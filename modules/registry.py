@@ -72,7 +72,7 @@ WEB_MODULES = ["gau", "nuclei", "fingerprint"]
 CRAWL_MODULES = ["katana", "gowitness"]
 
 # Content discovery, JS analysis, and quick-win vuln checks.
-DISCOVERY_MODULES = ["ffuf", "linkfinder", "corscanner", "bypass403", "secretfinder"]
+DISCOVERY_MODULES = ["ffuf", "linkfinder", "paramfinder", "corscanner", "bypass403", "secretfinder"]
 
 # Full module set — everything.
 FULL_MODULES = (

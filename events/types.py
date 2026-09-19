@@ -229,6 +229,13 @@ class ParameterData(BaseModel):
     def _v_name(cls, v: str) -> str:
         return _cap(v, 128)
 
+    @field_validator("sample_value")
+    @classmethod
+    def _v_sample(cls, v: str | None) -> str | None:
+        # Target-controlled — sanitize+cap at construction like every other
+        # target string. Never let raw values travel past this module.
+        return _cap(v, 256) if v is not None else None
+
     @field_validator("location")
     @classmethod
     def _v_loc(cls, v: str) -> str:

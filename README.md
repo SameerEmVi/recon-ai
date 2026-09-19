@@ -117,4 +117,4 @@ pytest          # config in pyproject.toml; asyncio_mode=auto
 ## Status
 
 All core phases complete (scope engine → events/DB/recon → AI triage → agent
-loop → module system + MCP). 284 tests passing.
+loop → module system + MCP). 291 tests passing.
