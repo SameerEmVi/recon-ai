@@ -105,6 +105,23 @@ Scope defaults to `[*.domain, domain]` if `--in-scope` is omitted; `--out-scope`
 deny always wins; `--max-distance` default 5. Resolved IPs are OUT under a
 domain-only scope (deny-first) — add `--in-scope <ip/CIDR>` to probe a host.
 
+**Excluding part of a domain** — `--out-scope` (short `-o`) carves hosts out of
+scope, and deny always beats allow. An exact out-scope host also excludes its
+whole subtree, so a single rule removes a subdomain and everything under it:
+
+```bash
+# abc.com (and its subdomains) in scope, but x.abc.com — and *.x.abc.com — out:
+python -m cli.main scan abc.com -o x.abc.com
+```
+
+| Host | Result |
+|---|---|
+| `abc.com` | IN |
+| `x.abc.com` | OUT (denied) |
+| `api.x.abc.com` | OUT (subtree of the denied host) |
+| `y.abc.com` | IN |
+| `notx.abc.com` | IN (no suffix confusion) |
+
 ### MCP server
 
 ```bash
@@ -122,4 +139,4 @@ pytest          # config in pyproject.toml; asyncio_mode=auto
 ## Status
 
 All core phases complete (scope engine → events/DB/recon → AI triage → agent
-loop → module system + MCP). 291 tests passing.
+loop → module system + MCP). 296 tests passing.

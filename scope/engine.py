@@ -62,8 +62,12 @@ class ScopeEngine:
                 reason=f"candidate {candidate!r} is not a valid host or IP",
             )
 
-        # Step 1: DENY wins. Checked first, before anything else.
-        deny = self._first_match(self._scope.out_scope, kind, ip_obj, domain)
+        # Step 1: DENY wins. Checked first, before anything else. Deny matching
+        # is intentionally broader than allow: an EXACT out-of-scope host also
+        # carves out its whole subtree (out-scope x.abc.com => x.abc.com AND
+        # *.x.abc.com are OUT). Erring toward denying more is the fail-safe
+        # direction for an out-of-scope rule.
+        deny = self._first_match(self._scope.out_scope, kind, ip_obj, domain, deny=True)
         if deny is not None:
             return ScopeDecision(
                 status=ScopeStatus.OUT,
@@ -127,14 +131,18 @@ class ScopeEngine:
             return None, None, ""
         return RuleKind.EXACT, None, domain
 
-    def _first_match(self, rules: list[ScopeRule], kind, ip_obj, domain):
-        """Return the first rule in `rules` that matches the candidate, or None."""
+    def _first_match(self, rules: list[ScopeRule], kind, ip_obj, domain, deny: bool = False):
+        """Return the first rule in `rules` that matches the candidate, or None.
+
+        `deny` is True when matching out-of-scope rules; it widens EXACT domain
+        matching to include the host's subtree (see _rule_matches).
+        """
         for rule in rules:
-            if self._rule_matches(rule, kind, ip_obj, domain):
+            if self._rule_matches(rule, kind, ip_obj, domain, deny=deny):
                 return rule
         return None
 
-    def _rule_matches(self, rule: ScopeRule, kind, ip_obj, domain) -> bool:
+    def _rule_matches(self, rule: ScopeRule, kind, ip_obj, domain, deny: bool = False) -> bool:
         # IP candidate only matches CIDR rules; domain candidate only matches
         # domain rules. No cross-type matching.
         if kind is RuleKind.CIDR:
@@ -148,7 +156,15 @@ class ScopeEngine:
 
         # domain candidate
         if rule.kind is RuleKind.EXACT:
-            return domain == rule.base_domain
+            if domain == rule.base_domain:
+                return True
+            # For a deny rule, an exact host also carves out its whole subtree.
+            # Label-boundary compare (leading ".") — same defense the wildcard
+            # branch uses against suffix/substring confusion. In-scope EXACT
+            # rules stay strictly exact (deny=False).
+            if deny and domain.endswith("." + rule.base_domain):
+                return True
+            return False
 
         if rule.kind is RuleKind.WILDCARD:
             base = rule.base_domain

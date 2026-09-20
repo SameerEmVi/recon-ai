@@ -128,6 +128,54 @@ def test_allow_still_works_for_sibling_of_denied_host():
 
 
 # ---------------------------------------------------------------------------
+# Out-of-scope EXACT host carves out its whole subtree (deny is broader)
+# ---------------------------------------------------------------------------
+
+def test_exact_deny_removes_the_host_itself():
+    # abc.com in scope, x.abc.com out — the exact host is denied.
+    d = evaluate("x.abc.com",
+                 in_scope=["*.abc.com", "abc.com"],
+                 out_scope=["x.abc.com"])
+    assert d.status is ScopeStatus.OUT
+    assert "x.abc.com" in d.matched_rule
+
+
+def test_exact_deny_also_removes_subdomains_of_denied_host():
+    # The whole subtree under the denied host is OUT, via the same exact rule.
+    for host in ("api.x.abc.com", "deep.nested.x.abc.com"):
+        d = evaluate(host,
+                     in_scope=["*.abc.com"],
+                     out_scope=["x.abc.com"])
+        assert d.status is ScopeStatus.OUT, host
+
+
+def test_exact_deny_keeps_apex_and_siblings_in():
+    # abc.com stays IN, sibling subdomains stay IN — only x.abc.com's tree is out.
+    for host in ("abc.com", "y.abc.com", "www.abc.com"):
+        d = evaluate(host,
+                     in_scope=["*.abc.com", "abc.com"],
+                     out_scope=["x.abc.com"])
+        assert d.status is ScopeStatus.IN, host
+
+
+def test_exact_deny_no_suffix_confusion():
+    # "notx.abc.com" must NOT be caught by an out-scope rule for "x.abc.com".
+    d = evaluate("notx.abc.com",
+                 in_scope=["*.abc.com"],
+                 out_scope=["x.abc.com"])
+    assert d.status is ScopeStatus.IN
+
+
+def test_in_scope_exact_stays_exact_not_subtree():
+    # Allow matching is unchanged: an EXACT in-scope rule does NOT grant the
+    # subtree (only deny was widened).
+    d = evaluate("api.abc.com", in_scope=["abc.com"])
+    assert d.status is ScopeStatus.OUT
+    d2 = evaluate("abc.com", in_scope=["abc.com"])
+    assert d2.status is ScopeStatus.IN
+
+
+# ---------------------------------------------------------------------------
 # Default-out semantics
 # ---------------------------------------------------------------------------
 

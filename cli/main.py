@@ -97,7 +97,10 @@ def scan(
     ),
     out_scope: list[str] = typer.Option(
         [], "--out-scope", "-o",
-        help="Out-of-scope rule (repeatable). Deny wins over any allow.",
+        help="Out-of-scope rule (repeatable). Deny wins over any allow. An "
+             "exact host (e.g. x.abc.com) also excludes its whole subtree "
+             "(*.x.abc.com); use a bare host to carve out a domain and "
+             "everything under it.",
     ),
     max_distance: int = typer.Option(5, "--max-distance"),
     wildcard_apex: bool = typer.Option(

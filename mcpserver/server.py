@@ -188,7 +188,8 @@ async def start_scan(
     domain          Root domain to enumerate (e.g. "example.com").
     db_url          Override the RECON_AI_DB_URL env var. Required if not set.
     in_scope        Scope rules. Defaults to ["*.domain", "domain"].
-    out_scope       Out-of-scope rules. Deny wins over any allow.
+    out_scope       Out-of-scope rules. Deny wins over any allow. An exact host
+                    (x.abc.com) also excludes its whole subtree (*.x.abc.com).
     max_distance    Max subdomain distance from seed (default 5).
     wildcard_apex   Let *.example.com also match example.com.
     ai              Enable LLM triage after enumeration (Phase 3).

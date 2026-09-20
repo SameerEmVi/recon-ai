@@ -1,7 +1,7 @@
 # Recon-AI — Project Context
 
 AI-assisted bug bounty **reconnaissance** platform. **Authorized targets only.**
-Python 3.12. Package name `recon-ai` (pyproject.toml). Not a git repo yet.
+Python 3.12. Package name `recon-ai` (pyproject.toml). Private git repo: github.com/SameerEmVi/recon-ai.
 
 Workflow: root domain + authorized scope → enumerate subdomains → resolve/probe
 live hosts → fingerprint → content discovery/fuzzing → (optional) LLM triage →
@@ -99,7 +99,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `events/` | Event model (`types.py`), pub/sub `bus.py`, `dedup.py` |
 | `recon/` | Subprocess wrappers around external binaries |
 | `modules/` | Event-driven modules: `passive/`, `active/`, `web/` + `base.py`, `registry.py` |
-| `controller/` | `controller.py` (scan lifecycle), `reflexes.py` |
+| `controller/` | `controller.py` (scan lifecycle) |
 | `database/` | SQLModel models, repositories, persister, session, diff (asyncpg/aiosqlite) |
 | `ai/` | `assessor.py` (forced-schema LLM call), `triage.py` (post-scan), `prompts/` |
 | `agent/` | Phase-4 agent loop: `loop.py`, `approval.py`, `stopping.py`, `tools.py` |
@@ -108,15 +108,14 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `normalize/` | Output parsers |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (291 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (296 tests, all passing) |
 | `wordlists/` | `common.txt`, `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
 
-Stray duplicates at repo root — **safe to delete, do not edit**: `types.py`
-(identical to `scope/types.py`), `test_scope_engine.py` (dup of
-`tests/security/`), and root `__init__.py`/`engine.py` shadowing the `scope/`
-package. The canonical files live under `scope/` and `tests/`.
+Repo root is clean — earlier stray duplicates (`types.py`, `engine.py`,
+`__init__.py`, `test_scope_engine.py`) that shadowed the `scope/` package and
+`tests/` have been removed. The canonical files live under `scope/` and `tests/`.
 
 ## Running it
 
@@ -136,7 +135,7 @@ python -m cli.main triage <scan_id> --db-url ...
 ```
 `--ai`/`--agent` need `ANTHROPIC_API_KEY` + `--db-url`. Default AI model string
 in code is `claude-sonnet-4-6`. Scope defaults to `[*.domain, domain]` if
-`--in-scope` omitted; `--out-scope` deny always wins; `--max-distance` default 5.
+`--in-scope` omitted; `--out-scope` deny always wins (an exact out-scope host also excludes its whole subtree, e.g. `x.abc.com` ⇒ `*.x.abc.com` OUT); `--max-distance` default 5.
 
 Every scan prints a readable end-of-scan **SCAN SUMMARY** (subdomains, ports, HTTP services, technologies, findings) via `ScanController.print_summary()`; per-event logging is DEBUG-only (`-v` to see it).
 
@@ -157,5 +156,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 291 tests passing. See persistent memory
+module system + MCP). 296 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.
