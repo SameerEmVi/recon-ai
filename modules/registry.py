@@ -60,13 +60,13 @@ DEFAULT_MODULES = ["subfinder", "dnsx", "httpx_probe"]
 PASSIVE_MODULES = ["crt_sh", "certspotter", "hackertarget", "wayback"]
 
 # Extra passive sources backed by external APIs or optional binaries.
-EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain"]
+EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains"]
 
 # Active subdomain-depth modules: brute-force + permutation/mutation.
-DEEP_DNS_MODULES = ["dnsbrute", "permutations"]
+DEEP_DNS_MODULES = ["dnsbrute", "permutations", "zonetransfer", "tlsx", "hakip2host"]
 
 # Web analysis modules (require web services to be discovered first).
-WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb"]
+WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover"]
 
 # Active crawling and screenshot modules.
 CRAWL_MODULES = ["katana", "gowitness"]

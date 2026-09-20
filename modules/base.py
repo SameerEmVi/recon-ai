@@ -159,5 +159,45 @@ class BaseModule(ABC):
             )
         return sig
 
+    async def run_proc(
+        self, cmd: list[str], *, timeout: int = 60, bucket: str | None = None,
+        input_text: str | None = None,
+    ) -> str | None:
+        """Run an external binary under the shared rate limiter and return its
+        stdout as text, or None on missing binary / timeout / error.
+
+        Centralizes the subprocess pattern every tool-wrapper module uses:
+        warn-and-skip if the binary isn't installed, honor concurrency/rate
+        limits via guard(), and never raise into the event loop.
+        """
+        import asyncio
+        try:
+            async with self.guard(bucket or f"proc:{self.name}"):
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdin=asyncio.subprocess.PIPE if input_text else None,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError:
+                    self._log.warning("%s not found — module disabled", cmd[0])
+                    return None
+                try:
+                    out, _ = await asyncio.wait_for(
+                        proc.communicate(
+                            input=input_text.encode() if input_text else None
+                        ),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    self._log.warning("%s timed out", cmd[0])
+                    return None
+            return (out or b"").decode("utf-8", "replace")
+        except Exception as exc:
+            self._log.debug("%s failed: %s", cmd[0], exc)
+            return None
+
     def __repr__(self) -> str:
         return f"<Module {self.name}>"
