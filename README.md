@@ -122,6 +122,16 @@ python -m cli.main scan abc.com -o x.abc.com
 | `y.abc.com` | IN |
 | `notx.abc.com` | IN (no suffix confusion) |
 
+### Output
+
+The CLI streams every discovered event live, colour-coded by type (subdomains,
+ports, HTTP services, technologies, URLs, endpoints, parameters, findings), each
+tagged with the tool that found it, then prints a colourful end-of-scan summary.
+
+- `-q` / `--quiet` — suppress the live event stream (summary still prints)
+- `--color` / `--no-color` — force colour on/off (default: auto — colour on a
+  TTY, plain text when piped/redirected, and honours `NO_COLOR`)
+
 ### MCP server
 
 ```bash

@@ -175,9 +175,22 @@ def scan(
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q",
+        help="Suppress the live per-event stream (the end-of-scan summary still prints).",
+    ),
+    color: bool | None = typer.Option(
+        None, "--color/--no-color",
+        help="Force colour on/off. Default: auto (colour on a TTY, off when piped).",
+    ),
 ) -> None:
     """Run a reconnaissance scan against an authorized domain."""
     _setup_logging(verbose)
+
+    from cli import ui
+    if color is not None:
+        ui.set_color(color)
+    print(ui.banner())
 
     resolved_in = list(in_scope) or [f"*.{domain}", domain]
     resolved_out = list(out_scope)
@@ -211,7 +224,7 @@ def scan(
         enabled_modules: list[str] | None = p["modules"]
         enabled_flags: list[str] | None = None
         profile_config = p.get("module_config", {})
-        typer.echo(f"[recon-ai] profile   : {profile} — {p['description']}")
+        typer.echo(ui.kv("profile", f"{profile} — {p['description']}"))
     elif list(module):
         # Explicit -m flags override everything.
         enabled_modules = list(module)
@@ -224,29 +237,31 @@ def scan(
         enabled_modules = None
         enabled_flags = ["passive"] if passive else None
 
-    typer.echo(f"[recon-ai] in-scope  : {resolved_in}")
-    typer.echo(f"[recon-ai] out-scope : {resolved_out or '(none)'}")
+    typer.echo(ui.kv("in-scope", resolved_in))
+    typer.echo(ui.kv("out-scope", resolved_out or "(none)"))
     mode_label = "A — deterministic"
     if agent:
         mode_label = "B+agent — AI triage + agent loop"
     elif ai_effective:
         mode_label = "B — AI-assisted"
-    typer.echo(f"[recon-ai] mode      : {mode_label}")
-    typer.echo(f"[recon-ai] db        : {db_url or '(none — in-memory only)'}")
+    typer.echo(ui.kv("mode", mode_label))
+    typer.echo(ui.kv("db", db_url or "(none — in-memory only)"))
     if enabled_modules:
-        typer.echo(f"[recon-ai] modules   : {enabled_modules}")
+        typer.echo(ui.kv("modules", ", ".join(enabled_modules)))
     elif passive:
-        typer.echo(f"[recon-ai] modules   : defaults + passive")
+        typer.echo(ui.kv("modules", "defaults + passive"))
     elif full:
-        typer.echo(f"[recon-ai] modules   : full")
+        typer.echo(ui.kv("modules", "full"))
+    else:
+        typer.echo(ui.kv("modules", "defaults"))
     if ai_effective:
-        typer.echo(f"[recon-ai] ai-model  : {ai_model}")
+        typer.echo(ui.kv("ai-model", ai_model))
     if agent:
-        typer.echo(f"[recon-ai] max-iter  : {max_iterations}")
+        typer.echo(ui.kv("max-iter", max_iterations))
 
     api_key = os.environ.get("ANTHROPIC_API_KEY") if ai_effective else None
     if ai_effective and not api_key:
-        typer.echo("[warn] ANTHROPIC_API_KEY not set — triage will be skipped", err=True)
+        typer.echo(ui.warn("ANTHROPIC_API_KEY not set — triage will be skipped"), err=True)
 
     from controller.controller import ScanController
     controller = ScanController(
@@ -262,12 +277,13 @@ def scan(
         max_agent_iterations=max_iterations,
         rate_limit=rate_limit,
         max_concurrency=max_concurrency,
+        live=not quiet,
     )
 
     try:
         asyncio.run(controller.run(domain))
     except KeyboardInterrupt:
-        typer.echo("\n[recon-ai] interrupted", err=True)
+        typer.echo(ui.warn("interrupted"), err=True)
         raise typer.Exit(code=130)
 
 

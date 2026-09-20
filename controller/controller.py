@@ -55,6 +55,8 @@ class ScanController:
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
+        # Live CLI event stream (off for MCP/background runs).
+        live: bool = False,
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -73,6 +75,7 @@ class ScanController:
         self._persister: Persister | None = None
         self._summary: dict[str, list] = {}
         self._scan_domain: str | None = None
+        self._live = live
         # Modules are loaded lazily in _do_run() (setup() is async).
         self._loaded_modules: list["BaseModule"] = []
 
@@ -99,6 +102,9 @@ class ScanController:
         accepted = await self._bus.publish(event)
 
         if accepted:
+            if self._live:
+                from cli import ui
+                print(ui.event_line(event))
             self._collect_for_summary(event)
             if self._persister is not None:
                 asyncio.create_task(self._persister.save_event(event))
@@ -115,9 +121,9 @@ class ScanController:
             bucket.append(event.data)
 
     def print_summary(self) -> None:
-        """Print a compact, readable summary of what the scan found."""
+        """Print a compact, readable, colourful summary of what the scan found."""
+        from cli import ui
         s = self._summary
-        line = "─" * 60
 
         def _get(d, *names):
             for n in names:
@@ -126,68 +132,101 @@ class ScanController:
                     return v
             return None
 
-        print(f"\n{line}\n  SCAN SUMMARY — {self._scan_domain or ''}\n{line}")
+        print()
+        print(ui.rule("", fg="bcyan"))
+        print("  " + ui.paint(f"SCAN SUMMARY", "bcyan", bold=True)
+              + "  " + ui.paint(self._scan_domain or "", "bwhite", bold=True))
+        print(ui.rule("", fg="bcyan"))
 
         # headline counts
         order = ["SUBDOMAIN", "DNS_RECORD", "IP", "OPEN_PORT", "HTTP_SERVICE",
                  "TECHNOLOGY", "URL", "ENDPOINT", "PARAMETER", "ANOMALY",
                  "FINDING_CANDIDATE"]
+        fg_of = {
+            "SUBDOMAIN": "cyan", "OPEN_PORT": "byellow", "HTTP_SERVICE": "bgreen",
+            "TECHNOLOGY": "bmagenta", "URL": "blue", "ENDPOINT": "bcyan",
+            "PARAMETER": "grey", "FINDING_CANDIDATE": "bred",
+        }
         counts = {t: len(s.get(t, [])) for t in order if s.get(t)}
         if counts:
-            print("  " + "   ".join(f"{t.lower()}={n}" for t, n in counts.items()))
+            chips = "   ".join(
+                f"{ui.paint(t.lower(), fg_of.get(t, 'white'))}="
+                f"{ui.paint(n, 'bwhite', bold=True)}"
+                for t, n in counts.items()
+            )
+            print("  " + chips)
 
         # subdomains
         subs = sorted({_get(d, "hostname") for d in s.get("SUBDOMAIN", [])} - {None})
         if subs:
-            print(f"\n  Subdomains ({len(subs)}):")
+            print("\n" + ui.section("Subdomains", len(subs)))
             for h in subs:
-                print(f"    • {h}")
+                print(ui.bullet(h, "cyan"))
 
         # open ports grouped by host
         ports: dict[str, list[int]] = {}
         for d in s.get("OPEN_PORT", []):
             ports.setdefault(getattr(d, "host", "?"), []).append(getattr(d, "port", 0))
         if ports:
-            print(f"\n  Open ports:")
+            print("\n" + ui.section("Open ports"))
             for host, plist in ports.items():
-                print(f"    • {host}: {', '.join(str(p) for p in sorted(set(plist)))}")
+                pl = ", ".join(str(p) for p in sorted(set(plist)))
+                print(ui.bullet(f"{host}: {ui.paint(pl, 'byellow')}"))
 
         # http services
         svcs = s.get("HTTP_SERVICE", [])
         if svcs:
-            print(f"\n  HTTP services ({len(svcs)}):")
+            print("\n" + ui.section("HTTP services", len(svcs)))
             for d in svcs:
                 title = _get(d, "title") or ""
                 srv = _get(d, "server") or ""
-                print(f"    • [{getattr(d,'status_code','?')}] {_get(d,'url')}  {srv} {('— ' + title) if title else ''}".rstrip())
+                code = getattr(d, "status_code", "?")
+                code_fg = "bgreen" if str(code).startswith("2") else (
+                    "byellow" if str(code).startswith("3") else "bred")
+                line = (f"{ui.paint('[' + str(code) + ']', code_fg, bold=True)} "
+                        f"{ui.paint(_get(d, 'url'), 'bwhite')}"
+                        f"{('  ' + srv) if srv else ''}"
+                        f"{('  — ' + title) if title else ''}")
+                print(ui.bullet(line))
 
         # technologies
         techs = sorted({f"{_get(d,'name')} {getattr(d,'version','') or ''}".strip()
                         for d in s.get("TECHNOLOGY", [])} - {""})
         if techs:
-            print(f"\n  Technologies ({len(techs)}): " + ", ".join(techs))
+            print("\n" + ui.section("Technologies", len(techs)))
+            print("  " + ", ".join(ui.paint(t, "bmagenta") for t in techs))
 
         # findings (the important bit)
         finds = s.get("FINDING_CANDIDATE", [])
         if finds:
-            print(f"\n  ⚠ Findings ({len(finds)}):")
+            print("\n" + ui.warn(f"Findings ({len(finds)}):"))
             sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
             for d in sorted(finds, key=lambda d: sev_rank.get((getattr(d, "severity_hint", "") or "info").lower(), 5)):
                 sev = (getattr(d, "severity_hint", "") or "info").upper()
-                print(f"    • [{sev}] {getattr(d,'title','')}  ({getattr(d,'host','')})")
+                badge = ui.paint(f"[{sev}]", ui.sev_color(sev), bold=True)
+                print(ui.bullet(f"{badge} {getattr(d,'title','')}  "
+                                f"{ui.paint('(' + str(getattr(d,'host','')) + ')', 'grey')}"))
 
-        # url/endpoint counts only (usually too many to list)
-        if s.get("URL"):
-            print(f"\n  URLs discovered: {len(s['URL'])}  (use --db-url or -v to inspect)")
-        print(line)
+        # url / endpoint / parameter counts
+        extras = []
+        for t, lbl in (("URL", "URLs"), ("ENDPOINT", "endpoints"), ("PARAMETER", "parameters")):
+            if s.get(t):
+                extras.append(f"{ui.paint(len(s[t]), 'bwhite', bold=True)} {lbl}")
+        if extras:
+            print("\n" + ui.info("discovered " + " · ".join(extras)
+                                 + ui.paint("  (use --db-url to inspect)", "grey", dim=True)))
+        print(ui.rule("", fg="bcyan"))
 
     async def run(self, seed_domain: str) -> None:
         self._scan_domain = seed_domain
         mode = "B — AI-assisted" if self._ai_enabled else "A — deterministic"
         log.info("scan %s | mode %s | seed %s", self._scan_id, mode, seed_domain)
         log.info("rate limiter: %s", self._rate_limiter.describe())
-        print(f"[recon-ai] scan={self._scan_id}  mode={mode}  seed={seed_domain}")
-        print(f"[recon-ai] rate-limit: {self._rate_limiter.describe()}")
+        from cli import ui
+        print(ui.kv("scan-id", self._scan_id))
+        print(ui.kv("mode", mode))
+        print(ui.kv("seed", seed_domain))
+        print(ui.kv("rate-lim", self._rate_limiter.describe()))
 
         if self._db_url:
             await self._init_db()
@@ -203,7 +242,8 @@ class ScanController:
                 await self._persister.scan_end(self._scan_id, self._bus.seen_count)
 
         self.print_summary()
-        print(f"[recon-ai] done | {self._bus.seen_count} events total")
+        from cli import ui
+        print(ui.ok(ui.paint(f"done — {self._bus.seen_count} events total", "bgreen", bold=True)))
 
     # ── properties ────────────────────────────────────────────────────────────
 
@@ -311,13 +351,19 @@ class ScanController:
         seed_names = [m.name for m in seed]
         reactive_names = [m.name for m in reactive]
         log.info("modules: seed=%s  reactive=%s", seed_names, reactive_names)
-        print(f"[recon-ai] modules: seed={seed_names}  reactive={reactive_names}")
+        from cli import ui
+        print(ui.kv("seed mods", ", ".join(seed_names) or "(none)"))
+        print(ui.kv("react mods", ", ".join(reactive_names) or "(none)"))
         return seed, reactive
 
     async def _do_run(self, seed_domain: str) -> None:
         # Load modules and subscribe reactive ones — MUST happen before any
         # events flow so reflexes are in place for the seed event.
         seed_modules, _reactive_modules = await self._load_and_setup_modules()
+
+        if self._live:
+            from cli import ui
+            print("\n" + ui.rule("live events") + "\n")
 
         # Patch DB record with actual domain.
         if self._persister:
@@ -419,7 +465,8 @@ class ScanController:
             max_iterations=self._max_agent_iterations,
         )
 
-        print(f"[recon-ai] agent starting (max_iterations={self._max_agent_iterations})")
+        from cli import ui
+        print(ui.info(f"agent starting (max_iterations={self._max_agent_iterations})"))
         try:
             result = await loop.run(self._scan_id, target_domain)
             print(
