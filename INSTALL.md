@@ -39,10 +39,19 @@ cd recon-ai
 
 Create a virtualenv and install the package with the extras you need.
 
-**Linux / macOS**
+**Linux / macOS (bash / zsh)**
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install -e ".[sqlite,ai,mcp,dev]"
+```
+
+**fish shell** (e.g. default on Kali) — the plain `activate` script is bash-only
+and will error with `"case" builtin not inside of switch block`; use the fish
+activator instead:
+```fish
+python -m venv .venv
+source .venv/bin/activate.fish        # csh/tcsh: source .venv/bin/activate.csh
 pip install -e ".[sqlite,ai,mcp,dev]"
 ```
 
@@ -52,6 +61,8 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[sqlite,ai,mcp,dev]"
 ```
+
+Deactivate any of these with `deactivate`.
 
 ### Extras
 
