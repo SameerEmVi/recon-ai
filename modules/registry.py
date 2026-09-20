@@ -63,16 +63,19 @@ PASSIVE_MODULES = ["crt_sh", "certspotter", "hackertarget", "wayback"]
 EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains"]
 
 # Active subdomain-depth modules: brute-force + permutation/mutation.
-DEEP_DNS_MODULES = ["dnsbrute", "permutations", "zonetransfer", "tlsx", "hakip2host"]
+DEEP_DNS_MODULES = ["dnsbrute", "permutations", "zonetransfer", "tlsx", "hakip2host", "puredns", "gotator"]
 
 # Web analysis modules (require web services to be discovered first).
-WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover"]
+WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover", "urlfinder", "waymore", "csprecon"]
 
 # Active crawling and screenshot modules.
 CRAWL_MODULES = ["katana", "gowitness"]
 
 # Content discovery, JS analysis, and quick-win vuln checks.
 DISCOVERY_MODULES = ["ffuf", "linkfinder", "paramfinder", "apifinder", "corscanner", "bypass403", "secretfinder"]
+
+# Cloud storage / bucket exposure.
+CLOUD_MODULES = ["s3scanner", "cloud_enum"]
 
 # Full module set — everything.
 FULL_MODULES = (
@@ -84,6 +87,7 @@ FULL_MODULES = (
     + ["naabu", "nmap"]
     + CRAWL_MODULES
     + DISCOVERY_MODULES
+    + CLOUD_MODULES
 )
 
 # ── Scan profiles ─────────────────────────────────────────────────────────────
