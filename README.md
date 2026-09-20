@@ -69,13 +69,18 @@ scan when the target starts blocking).
 ## Install
 
 ```bash
-python -m venv .venv && . .venv/Scripts/activate   # Windows: .venv\Scripts\activate
+git clone https://github.com/SameerEmVi/recon-ai.git && cd recon-ai
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[sqlite,ai,mcp,dev]"
 ```
 
 External binaries are optional per module (modules warn-and-skip if a binary is
 missing). Commonly used: subfinder, dnsx, httpx (ProjectDiscovery), naabu,
-katana, ffuf, nuclei. See `CLAUDE.md` for toolchain notes.
+katana, ffuf, nuclei.
+
+**See [INSTALL.md](INSTALL.md) for the full installation guide** — prerequisites,
+Go/recon-binary setup, the Windows `httpx` PATH gotcha, database and AI
+configuration, verification, and troubleshooting.
 
 ## Usage
 
