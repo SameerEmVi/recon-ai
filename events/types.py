@@ -129,6 +129,10 @@ class HttpServiceData(BaseModel):
     server: str | None = None
     content_length: int | None = None
     redirect_location: str | None = None
+    # Raw technology strings from the prober (e.g. httpx -td / Wappalyzer),
+    # each optionally "Name:version". Normalized into TECHNOLOGY events by the
+    # fingerprint module. Target-controlled — sanitized/capped below.
+    technologies: list[str] = Field(default_factory=list)
 
     @field_validator("url")
     @classmethod
@@ -145,19 +149,28 @@ class HttpServiceData(BaseModel):
     def _v_redirect(cls, v: str | None) -> str | None:
         return _cap(v, 2048) if v else v
 
+    @field_validator("technologies")
+    @classmethod
+    def _v_techs(cls, v: list[str]) -> list[str]:
+        return [_cap(t, 256) for t in (v or []) if t and t.strip()][:100]
+
 
 class TechnologyData(BaseModel):
     host: str
     name: str
     version: str | None = None
     category: str | None = None   # cms, framework, server, language
+    # Detection provenance: which tool/method produced this technology, e.g.
+    # "httpx", "whatweb", "nuclei", "heuristic". Dedup is by host:name:version
+    # (see events/dedup.py), so the surviving event records its first detector.
+    source: str | None = None
 
     @field_validator("host", "name")
     @classmethod
     def _v_str(cls, v: str) -> str:
         return _cap(v, 256)
 
-    @field_validator("version", "category")
+    @field_validator("version", "category", "source")
     @classmethod
     def _v_short(cls, v: str | None) -> str | None:
         return _cap(v, 64) if v else v

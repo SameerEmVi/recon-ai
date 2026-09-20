@@ -67,6 +67,39 @@ def _parse_version(pattern: re.Pattern, text: str) -> str | None:
     return None
 
 
+# Best-effort category for common Wappalyzer/WhatWeb tech names.
+_CATEGORY_MAP: dict[str, str] = {
+    "nginx": "server", "apache": "server", "iis": "server",
+    "openresty": "server", "litespeed": "server", "caddy": "server",
+    "php": "language", "python": "language", "ruby": "language",
+    "node.js": "language", "java": "language",
+    "wordpress": "cms", "drupal": "cms", "joomla": "cms",
+    "react": "framework", "next.js": "framework", "vue.js": "framework",
+    "angular": "framework", "django": "framework", "laravel": "framework",
+    "express": "framework", "jquery": "js-library", "bootstrap": "ui-framework",
+    "cloudflare": "cdn", "akamai": "cdn", "fastly": "cdn",
+    "graphql": "api", "swagger": "api-docs",
+}
+
+
+def _split_name_version(raw: str) -> tuple[str, str | None]:
+    """Split a prober tech string into (name, version).
+
+    httpx/Wappalyzer emits "Name" or "Name:version" (e.g. "Nginx:1.18.0").
+    """
+    raw = raw.strip()
+    if ":" in raw:
+        name, _, ver = raw.partition(":")
+        name = name.strip()
+        ver = ver.strip()
+        return (name or raw, ver or None)
+    return (raw, None)
+
+
+def _category_for(name: str) -> str | None:
+    return _CATEGORY_MAP.get(name.strip().lower())
+
+
 @register
 class FingerprintModule(BaseModule):
     name = "fingerprint"
@@ -91,18 +124,35 @@ class FingerprintModule(BaseModule):
 
         emitted: set[str] = set()
 
-        async def _emit(name: str, version: str | None = None, category: str | None = None) -> None:
-            key = f"{name}:{version}"
+        async def _emit(
+            name: str,
+            version: str | None = None,
+            category: str | None = None,
+            source: str = "heuristic",
+        ) -> None:
+            if not name:
+                return
+            # Dedup within this event by name+version (bus dedups across events).
+            key = f"{name.lower()}:{version or ''}"
             if key in emitted:
                 return
             emitted.add(key)
             await self.emit(
                 EventType.TECHNOLOGY,
-                TechnologyData(host=host, name=name, version=version, category=category),
+                TechnologyData(
+                    host=host, name=name, version=version,
+                    category=category, source=source,
+                ),
                 source_event=event,
             )
 
-        # Server header fingerprinting.
+        # 1. Prober-supplied technologies (httpx -td / Wappalyzer) — the real
+        #    fingerprint database. Normalized into TECHNOLOGY events with source.
+        for raw in getattr(d, "technologies", None) or []:
+            name, version = _split_name_version(raw)
+            await _emit(name, version, _category_for(name), source="httpx")
+
+        # 2. Heuristic fallbacks (no binary): Server header fingerprinting.
         for pattern, tech_name in _SERVER_SIGS:
             if pattern.search(server):
                 version = _parse_version(pattern, server)

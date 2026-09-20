@@ -89,6 +89,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 - Secret scanning: **secretfinder** (`modules/web/secretfinder.py` + `recon/secrets.py`) watches `HTTP_SERVICE`+`URL`, fetches bodies/JS/maps, regex+entropy detects exposed keys/tokens → `FINDING_CANDIDATE` (category `exposed-secret`). Secrets are **redacted** before hitting any event (never stored/logged/sent to LLM).
 - Parameter discovery: **paramfinder** (`modules/web/paramfinder.py`) watches `URL`+`ENDPOINT`, extracts query-string params and endpoint parameter names (pure Python, no network) → `PARAMETER` events. It is the producer for the `PARAMETER` type (the dedup key + `ParameterData` already existed). `sample_value` is sanitized/capped by the `ParameterData` validator like every other target string. In the `DISCOVERY` group / `--full`.
 - JS & API endpoint discovery: **apifinder** (`modules/web/apifinder.py`) watches `HTTP_SERVICE`+`URL`, fetches JS/HTML/JSON bodies via the shared limiter and regex-extracts (deterministic, no LLM) JS-referenced URLs (absolute/proto-rel/root-rel/path-rel, all resolved), API paths (`/api/`, `/api/vN`), GraphQL/Swagger/OpenAPI/api-docs locations, and query params → emits existing `URL`/`ENDPOINT`/`PARAMETER`/`TECHNOLOGY` events. Also emits a configurable well-known API/doc path list (`options["well_known_paths"]`, not the sole mechanism) per live service. All emission goes through `self.emit`→`stamp_and_publish`→ScopeEngine, so discovered URLs are scope-gated + dedup'd and re-enter the pipeline (linkfinder/paramfinder/secretfinder/httpx_probe react). Pure extraction helpers (`discover`, `resolve_ref`, `classify_api_url`, `params_from_url`) are unit-tested directly. In the `DISCOVERY` group / `--full`.
+- Tech fingerprinting: **fingerprint** (`modules/web/fingerprint.py`) watches `HTTP_SERVICE` → `TECHNOLOGY`. There is no bespoke fingerprint DB — httpx's bundled **Wappalyzer** DB is the source: `recon/httpx_wrap.py` runs `httpx -td`, `parse_httpx_json` captures the `tech` array into `HttpServiceData.technologies`, and fingerprint normalizes each (split `Name:version`, best-effort category) → `TECHNOLOGY` with `source="httpx"`. A small regex signature set (server header / title / URL path) is the no-binary fallback (`source="heuristic"`). Optional **whatweb** (`modules/web/whatweb.py` + `normalize.parse_whatweb_json`) is a second source (`source="whatweb"`, warn-and-skips without the binary). `TechnologyData.source` records provenance; dedup is by `host:name:version` (source excluded) so the same tech from multiple tools collapses to one event. All emission goes through the scope gate.
 - Port scanning combo: **naabu** discovers open ports fast → **nmap** (`modules/active/nmap.py` + `recon/nmap.py`) watches `OPEN_PORT` and runs `-sV` for service/version → `TECHNOLOGY` events. nmap is `-sV -Pn -n` only (no NSE/OS-detect) unless opted in.
 - Profiles: `fast` (passive only) · `default` · `full` · `paranoid`
 
@@ -109,7 +110,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `normalize/` | Output parsers |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (315 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (328 tests, all passing) |
 | `wordlists/` | `common.txt`, `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -157,5 +158,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 315 tests passing. See persistent memory
+module system + MCP). 328 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.

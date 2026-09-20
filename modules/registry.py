@@ -66,7 +66,7 @@ EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain"]
 DEEP_DNS_MODULES = ["dnsbrute", "permutations"]
 
 # Web analysis modules (require web services to be discovered first).
-WEB_MODULES = ["gau", "nuclei", "fingerprint"]
+WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb"]
 
 # Active crawling and screenshot modules.
 CRAWL_MODULES = ["katana", "gowitness"]

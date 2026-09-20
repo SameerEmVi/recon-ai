@@ -21,6 +21,7 @@ class HttpxWrapper(BaseReconTool):
                 "-silent", "-json",
                 "-title", "-server", "-status-code",
                 "-content-length", "-follow-redirects",
+                "-td",  # tech-detect: httpx's bundled Wappalyzer fingerprint DB
             ],
             timeout=60,
         )
