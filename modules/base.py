@@ -53,6 +53,28 @@ class BaseModule(ABC):
     # External binaries this module requires (checked in default setup()).
     deps_binary: ClassVar[list[str]] = []
 
+    # ── Adaptive Reconnaissance Planner metadata ──────────────────────────────
+    # Consumed by planner.ReconPlanner to decide *whether* this module is worth
+    # running for a given discovery, instead of blindly firing on every event.
+    #
+    #   estimated_cost         : relative execution cost. None => derived from
+    #                            flags (slow=HIGH, passive=LOW, else MEDIUM).
+    #   expected_value         : relative information value. None => MEDIUM.
+    #   supported_technologies : if non-empty, the module is only useful when one
+    #                            of these technologies is present on the host
+    #                            (e.g. ["GraphQL"], ["WordPress"]). [] => agnostic.
+    #   prerequisites          : EventType value-strings that must already have
+    #                            been observed for a host before this module runs.
+    estimated_cost: ClassVar[int | None] = None
+    expected_value: ClassVar[int | None] = None
+    supported_technologies: ClassVar[list[str]] = []
+    prerequisites: ClassVar[list[str]] = []
+
+    @property
+    def is_passive(self) -> bool:
+        """True if this module makes no active requests to the target."""
+        return "passive" in self.flags
+
     # ── instance ──────────────────────────────────────────────────────────────
 
     def __init__(

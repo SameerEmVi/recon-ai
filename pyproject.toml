@@ -50,6 +50,7 @@ packages = [
     "agent",
     "mcpserver",
     "ratelimit",
+    "planner",
     "normalize",
     "cli",
 ]

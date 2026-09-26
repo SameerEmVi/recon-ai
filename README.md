@@ -76,7 +76,8 @@ pip install -e ".[sqlite,ai,mcp,dev]"
 
 External binaries are optional per module (modules warn-and-skip if a binary is
 missing). Commonly used: subfinder, dnsx, httpx (ProjectDiscovery), naabu,
-katana, ffuf, nuclei.
+katana, nuclei. Directory/content discovery is native (the **dirsearch** module,
+no binary required).
 
 **See [INSTALL.md](INSTALL.md) for the full installation guide** — prerequisites,
 Go/recon-binary setup, the Windows `httpx` PATH gotcha, database and AI
@@ -149,4 +150,4 @@ pytest          # config in pyproject.toml; asyncio_mode=auto
 ## Status
 
 All core phases complete (scope engine → events/DB/recon → AI triage → agent
-loop → module system + MCP). 369 tests passing.
+loop → module system + MCP). 502 tests passing.

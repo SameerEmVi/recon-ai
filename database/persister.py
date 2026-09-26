@@ -7,6 +7,7 @@ without persistence (in-memory only). The scan logic is identical either way.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from uuid import UUID
 
@@ -21,35 +22,53 @@ log = logging.getLogger(__name__)
 
 class Persister:
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._scan_repo = ScanRepository(session)
         self._event_repo = EventRepository(session)
         self._host_repo = HostRepository(session)
         self._finding_repo = FindingRepository(session)
         self._assessment_repo = AiAssessmentRepository(session)
+        # A single AsyncSession is NOT safe for concurrent use. The controller
+        # fires save_event() as many parallel background tasks, so every write
+        # must be serialized through this lock — otherwise overlapping commit()/
+        # flush calls raise IllegalStateChangeError and corrupt the session.
+        self._lock = asyncio.Lock()
 
     async def scan_start(
         self, scan_id: UUID, domain: str, scope_config: dict, mode: str
     ) -> None:
-        await self._scan_repo.create(scan_id, domain, scope_config, mode)
+        async with self._lock:
+            await self._scan_repo.create(scan_id, domain, scope_config, mode)
         log.debug("db: scan_start %s", scan_id)
 
     async def save_event(self, event: Event) -> None:
-        """Persist an event and update derived tables (Host, Finding)."""
-        saved = await self._event_repo.save(event)
-        if not saved:
-            return  # duplicate — already handled by bus dedup, but be safe
+        """Persist an event and update derived tables (Host, Finding).
 
-        await self._update_host(event)
+        Serialized via self._lock (shared session) and rolled back on error so a
+        single failed write can never poison the session for subsequent events.
+        """
+        async with self._lock:
+            try:
+                saved = await self._event_repo.save(event)
+                if not saved:
+                    return  # duplicate — already handled by bus dedup, but be safe
 
-        if event.type is EventType.FINDING_CANDIDATE:
-            await self._finding_repo.from_event(event)
+                await self._update_host(event)
+
+                if event.type is EventType.FINDING_CANDIDATE:
+                    await self._finding_repo.from_event(event)
+            except Exception as exc:
+                log.debug("db: save_event failed (%s) — rolling back", exc)
+                await self._session.rollback()
 
     async def scan_end(self, scan_id: UUID, event_count: int) -> None:
-        await self._scan_repo.complete(scan_id, event_count)
+        async with self._lock:
+            await self._scan_repo.complete(scan_id, event_count)
         log.debug("db: scan_end %s  events=%d", scan_id, event_count)
 
     async def scan_fail(self, scan_id: UUID) -> None:
-        await self._scan_repo.fail(scan_id)
+        async with self._lock:
+            await self._scan_repo.fail(scan_id)
 
     # ── host table maintenance ─────────────────────────────────────────────────
 

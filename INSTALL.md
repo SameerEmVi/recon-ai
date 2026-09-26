@@ -94,8 +94,10 @@ go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 go install github.com/projectdiscovery/katana/cmd/katana@latest
-go install github.com/ffuf/ffuf/v2@latest
 ```
+
+Directory/content discovery is native (the **dirsearch** module) — no `ffuf` or
+other fuzzing binary is required.
 
 Go installs land in `$(go env GOPATH)/bin` (default `~/go/bin`). Make sure that
 directory is on your `PATH`.

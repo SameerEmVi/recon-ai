@@ -161,6 +161,18 @@ def scan(
         help="Max simultaneous recon operations (HTTP requests + subprocesses). "
              "Omit = unlimited.",
     ),
+    # ── adaptive planner ──────────────────────────────────────────────────────
+    plan_mode: str = typer.Option(
+        "default", "--plan-mode",
+        help="Adaptive planner mode: passive-first | default | aggressive. "
+             "passive-first runs only passive modules; aggressive raises budgets "
+             "and per-host caps. Default preserves normal behaviour.",
+    ),
+    budget: int = typer.Option(
+        0, "--budget",
+        help="Max total module executions the planner will allow (0 = unlimited). "
+             "Useful to cap cost on large scopes.",
+    ),
     ai_model: str = typer.Option(
         "claude-sonnet-4-6", "--ai-model",
         help="Anthropic model for triage and agent.",
@@ -208,6 +220,11 @@ def scan(
 
     ai_effective = ai or agent
 
+    from planner import MODES
+    if plan_mode not in MODES:
+        typer.echo(f"[error] unknown --plan-mode {plan_mode!r}. Available: {', '.join(MODES)}", err=True)
+        raise typer.Exit(code=1)
+
     # Resolve module selection — profiles take precedence.
     from modules.registry import FULL_MODULES, PASSIVE_MODULES, SCAN_PROFILES
     profile_config: dict = {}
@@ -245,6 +262,8 @@ def scan(
     elif ai_effective:
         mode_label = "B — AI-assisted"
     typer.echo(ui.kv("mode", mode_label))
+    if plan_mode != "default" or budget:
+        typer.echo(ui.kv("planner", f"{plan_mode}" + (f" (budget {budget})" if budget else "")))
     typer.echo(ui.kv("db", db_url or "(none — in-memory only)"))
     if enabled_modules:
         typer.echo(ui.kv("modules", ", ".join(enabled_modules)))
@@ -277,6 +296,8 @@ def scan(
         max_agent_iterations=max_iterations,
         rate_limit=rate_limit,
         max_concurrency=max_concurrency,
+        plan_mode=plan_mode,
+        plan_budget=budget,
         live=not quiet,
     )
 
@@ -420,6 +441,121 @@ async def _diff(scan_a: uuid.UUID, scan_b: uuid.UUID, db_url: str) -> None:
     async with make_session_factory(engine)() as session:
         result = await compute_diff(EventRepository(session), scan_a, scan_b)
     typer.echo(result.summary())
+
+
+# ── wordlist (persistent reconnaissance learning system) ─────────────────────────
+
+wordlist_app = typer.Typer(
+    name="wordlist",
+    help="Inspect and export the persistent recon-vocabulary knowledge base.",
+    no_args_is_help=True,
+)
+app.add_typer(wordlist_app, name="wordlist")
+
+
+@wordlist_app.command("stats")
+def wordlist_stats(
+    db_url: str = typer.Option(..., "--db-url", help="Database URL."),
+    scope: str | None = typer.Option(
+        None, "--scope",
+        help="Filter to a scope type: global | technology | target | organization.",
+    ),
+    scope_key: str | None = typer.Option(
+        None, "--scope-key", help="Filter to a scope key (e.g. a tech name or domain)."
+    ),
+) -> None:
+    """Show knowledge-base size per category and per scope."""
+    asyncio.run(_wordlist_stats(db_url, scope, scope_key))
+
+
+async def _wordlist_stats(db_url: str, scope: str | None, scope_key: str | None) -> None:
+    from database.knowledge_base import KnowledgeBase
+    from database.session import init_db, make_engine, make_session_factory
+
+    engine = make_engine(db_url)
+    await init_db(engine)
+    async with make_session_factory(engine)() as session:
+        stats = await KnowledgeBase(session).stats(scope, scope_key)
+    typer.echo(f"knowledge base: {stats['total']} vocabulary items")
+    if stats.get("by_scope"):
+        typer.echo("by scope:")
+        for s, n in sorted(stats["by_scope"].items()):
+            typer.echo(f"  {s:<14}{n}")
+    typer.echo("by category:")
+    for cat, n in sorted(stats["by_category"].items()):
+        typer.echo(f"  {cat:<16}{n}")
+    if not stats["by_category"]:
+        typer.echo("  (empty — run a scan with --db-url and --full to populate it)")
+
+
+@wordlist_app.command("export")
+def wordlist_export(
+    category: str = typer.Argument(..., help="Category (see recon.vocabulary.CATEGORIES)."),
+    db_url: str = typer.Option(..., "--db-url", help="Database URL."),
+    scope: str = typer.Option(
+        "global", "--scope",
+        help="Knowledge scope: global | technology | target | organization.",
+    ),
+    scope_key: str = typer.Option(
+        "", "--scope-key",
+        help="Scope key (required for technology/target/organization scopes).",
+    ),
+    out: str | None = typer.Option(
+        None, "--out", "-O", help="Write to this file instead of stdout."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Cap the number of words emitted."
+    ),
+    min_targets: int = typer.Option(
+        1, "--min-targets", help="Only words seen on at least this many targets."
+    ),
+    min_occurrence: int = typer.Option(
+        1, "--min-occurrence", help="Only words seen at least this many times."
+    ),
+    min_confidence: float = typer.Option(
+        0.0, "--min-confidence", help="Only words with at least this confidence (0..1)."
+    ),
+) -> None:
+    """Generate a ranked wordlist for one category+scope (broadest/most-confident first).
+
+    The output file can be fed straight to content discovery, e.g. the dirsearch
+    module's wordlist=<path> option. Learned words are candidates for probing,
+    never assertions that any of them exist.
+    """
+    from recon.vocabulary import CATEGORIES, SCOPES
+
+    if category not in CATEGORIES:
+        typer.echo(f"[error] unknown category {category!r}. Available: {', '.join(CATEGORIES)}", err=True)
+        raise typer.Exit(code=1)
+    if scope not in SCOPES:
+        typer.echo(f"[error] unknown scope {scope!r}. Available: {', '.join(SCOPES)}", err=True)
+        raise typer.Exit(code=1)
+    asyncio.run(_wordlist_export(
+        db_url, category, scope, scope_key, out, limit, min_targets, min_occurrence, min_confidence
+    ))
+
+
+async def _wordlist_export(
+    db_url: str, category: str, scope: str, scope_key: str, out: str | None,
+    limit: int | None, min_targets: int, min_occurrence: int, min_confidence: float,
+) -> None:
+    from database.knowledge_base import KnowledgeBase
+    from database.session import init_db, make_engine, make_session_factory
+
+    engine = make_engine(db_url)
+    await init_db(engine)
+    async with make_session_factory(engine)() as session:
+        kb = KnowledgeBase(session)
+        kw = dict(
+            scope_type=scope, scope_key=scope_key, min_target_count=min_targets,
+            min_occurrence=min_occurrence, min_confidence=min_confidence, limit=limit,
+        )
+        if out:
+            n = await kb.export_to_file(category, out, **kw)
+            typer.echo(f"wrote {n} words to {out}")
+        else:
+            for w in await kb.generate_wordlist(category, **kw):
+                typer.echo(w)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ the PARAMETER event type — the dedup key (param:<url>:<location>:<name>) and
 the ParameterData model already existed; nothing emitted them until now.
 
 No network I/O: parameters are read out of URLs other modules already
-discovered (crt_sh/wayback/gau/katana/ffuf/linkfinder), so this stays cheap
+discovered (crt_sh/wayback/gau/katana/dirsearch/linkfinder), so this stays cheap
 and fully deterministic.
 
 Watches:  URL, ENDPOINT

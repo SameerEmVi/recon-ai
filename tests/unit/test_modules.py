@@ -53,7 +53,7 @@ def test_registry_discovers_all_expected_modules():
         "subfinder", "dnsx", "naabu", "httpx_probe", "katana", "gowitness",
         "dnsbrute", "permutations",
         # web
-        "gau", "nuclei", "fingerprint", "ffuf", "linkfinder", "corscanner", "bypass403",
+        "gau", "nuclei", "fingerprint", "dirsearch", "linkfinder", "corscanner", "bypass403",
     ]
     for name in expected:
         assert name in names, f"module '{name}' not found in registry"
@@ -555,18 +555,9 @@ def test_gowitness_watches_http_service():
     assert "gowitness" in m.deps_binary
 
 
-# ── ffuf module ───────────────────────────────────────────────────────────────
+# ── content-discovery wordlists ───────────────────────────────────────────────
 
-def test_ffuf_watches_http_service():
-    ctrl = _mock_controller()
-    m = ModuleRegistry.load(names=["ffuf"], controller=ctrl)[0]
-    assert "HTTP_SERVICE" in m.watched_events
-    assert "URL" in m.produced_events
-    assert m.opt("wordlist") == "common"
-    assert m.opt("threads") == 40
-
-
-def test_ffuf_bundled_wordlist_exists():
+def test_bundled_wordlist_exists():
     from pathlib import Path
     wl_dir = Path(__file__).parent.parent.parent / "wordlists"
     common = wl_dir / "common.txt"
