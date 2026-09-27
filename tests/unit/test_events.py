@@ -198,3 +198,44 @@ async def test_bus_calls_subscriber():
     await asyncio.sleep(0.05)   # let the spawned task run
     assert len(received) == 1
     assert received[0].dedup_key == e.dedup_key
+
+
+async def test_bus_drain_waits_for_slow_handler():
+    """drain() must not return until an in-flight slow handler finishes."""
+    bus = EventBus()
+    done = []
+
+    async def slow(event: Event) -> None:
+        await asyncio.sleep(0.2)
+        done.append(event)
+
+    bus.subscribe(EventType.SUBDOMAIN, slow)
+    await bus.publish(_in_scope_event())
+    assert done == []          # handler still running right after publish
+    await bus.drain()
+    assert len(done) == 1      # drain waited for it
+
+
+async def test_bus_drain_waits_for_nested_cascade():
+    """A handler that publishes another event (whose handler is also slow) must
+    be fully drained — the subdomain→probe→fuzz chain ffuf exposed."""
+    bus = EventBus()
+    stages: list[str] = []
+
+    async def on_subdomain(event: Event) -> None:
+        await asyncio.sleep(0.1)
+        stages.append("probe")
+        url = make(EventType.URL, UrlData(url="https://api.example.com/a"))
+        url.scope_status = ScopeStatus.IN
+        url.distance = 2
+        await bus.publish(url)          # spawns the next stage mid-drain
+
+    async def on_url(event: Event) -> None:
+        await asyncio.sleep(0.1)
+        stages.append("fuzz")
+
+    bus.subscribe(EventType.SUBDOMAIN, on_subdomain)
+    bus.subscribe(EventType.URL, on_url)
+    await bus.publish(_in_scope_event())
+    await bus.drain()
+    assert stages == ["probe", "fuzz"]   # both stages completed before drain returned

@@ -472,8 +472,10 @@ class ScanController:
                 ]
             )
 
-        # Let in-flight reactive tasks settle.
-        await asyncio.sleep(0.2)
+        # Wait for the reactive cascade (subdomain→resolve→probe→fuzz, incl. slow
+        # modules like ffuf/dirsearch) to go quiescent before teardown. Replaces
+        # a fixed 0.2s sleep that cancelled in-flight reactive tasks.
+        await self._bus.drain()
 
         # Call finish() on every module.
         for module in self._loaded_modules:
