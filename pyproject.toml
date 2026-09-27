@@ -51,6 +51,7 @@ packages = [
     "mcpserver",
     "ratelimit",
     "planner",
+    "output",
     "normalize",
     "cli",
 ]

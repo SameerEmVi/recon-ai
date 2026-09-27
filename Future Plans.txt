@@ -1,0 +1,4 @@
+Integration left to do:
+ 
+1. I have to integrate ffuf smart fuzzing like a scenario where the application is returning 301 and there I have to smartly fuzz by filtering out the code 301 and hunt for other.
+2.

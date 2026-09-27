@@ -59,6 +59,9 @@ class ScanController:
         # Adaptive Reconnaissance Planner
         plan_mode: str = "default",          # passive-first | default | aggressive
         plan_budget: int = 0,                # max module executions; 0 = unlimited
+        # Result output (Central Result Aggregator → results/<domain>/)
+        results_enabled: bool = True,
+        out_dir: str = "results",
         # Live CLI event stream (off for MCP/background runs).
         live: bool = False,
     ) -> None:
@@ -70,6 +73,10 @@ class ScanController:
         self._planner = ReconPlanner(
             PlannerConfig(mode=plan_mode, max_executions=plan_budget)
         )
+        self._aggregator = None
+        if results_enabled:
+            from output import ResultAggregator
+            self._aggregator = ResultAggregator(out_dir)
         self._ai_enabled = ai_enabled
         self._agent_enabled = agent_enabled
         self._enabled_modules = enabled_modules
@@ -113,6 +120,9 @@ class ScanController:
         self._planner.observe(event)
 
         accepted = await self._bus.publish(event)
+
+        if accepted and self._aggregator is not None:
+            self._aggregator.observe(event)
 
         if accepted:
             if self._live:
@@ -265,6 +275,16 @@ class ScanController:
             for reason, n in sorted(pstats["skip_reasons"].items(), key=lambda kv: -kv[1])[:6]:
                 print(ui.bullet(f"{ui.paint(str(n), 'byellow')} skipped — {reason}", "grey"))
         print(ui.ok(ui.paint(f"done — {self._bus.seen_count} events total", "bgreen", bold=True)))
+
+        if self._aggregator is not None:
+            try:
+                import os as _os
+                scan_dir = self._aggregator.write(seed_domain)
+                base = _os.path.dirname(_os.path.dirname(scan_dir))
+                print(ui.ok(f"results written → {scan_dir}"))
+                print(ui.info(f"latest → {_os.path.join(base, 'latest')}"))
+            except Exception as exc:
+                log.error("failed to write results: %s", exc)
 
     # ── properties ────────────────────────────────────────────────────────────
 

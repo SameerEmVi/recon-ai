@@ -173,6 +173,15 @@ def scan(
         help="Max total module executions the planner will allow (0 = unlimited). "
              "Useful to cap cost on large scopes.",
     ),
+    # ── result output ─────────────────────────────────────────────────────────
+    out_dir: str = typer.Option(
+        "results", "--out-dir",
+        help="Directory for categorized result files (results/<domain>/latest/…).",
+    ),
+    no_results: bool = typer.Option(
+        False, "--no-results",
+        help="Disable writing the categorized result directory on scan completion.",
+    ),
     ai_model: str = typer.Option(
         "claude-sonnet-4-6", "--ai-model",
         help="Anthropic model for triage and agent.",
@@ -298,6 +307,8 @@ def scan(
         max_concurrency=max_concurrency,
         plan_mode=plan_mode,
         plan_budget=budget,
+        results_enabled=not no_results,
+        out_dir=out_dir,
         live=not quiet,
     )
 

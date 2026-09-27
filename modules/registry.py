@@ -60,7 +60,7 @@ DEFAULT_MODULES = ["subfinder", "dnsx", "httpx_probe"]
 PASSIVE_MODULES = ["crt_sh", "certspotter", "hackertarget", "wayback"]
 
 # Extra passive sources backed by external APIs or optional binaries.
-EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains"]
+EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains", "censys"]
 
 # Active subdomain-depth modules: brute-force + permutation/mutation.
 DEEP_DNS_MODULES = ["dnsbrute", "permutations", "zonetransfer", "tlsx", "hakip2host", "puredns", "gotator"]
