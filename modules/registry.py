@@ -60,7 +60,7 @@ DEFAULT_MODULES = ["subfinder", "dnsx", "httpx_probe"]
 PASSIVE_MODULES = ["crt_sh", "certspotter", "hackertarget", "wayback"]
 
 # Extra passive sources backed by external APIs or optional binaries.
-EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains"]
+EXTRA_PASSIVE_MODULES = ["chaos", "anubis", "amass", "assetfinder", "findomain", "github_subdomains", "censys"]
 
 # Active subdomain-depth modules: brute-force + permutation/mutation.
 DEEP_DNS_MODULES = ["dnsbrute", "permutations", "zonetransfer", "tlsx", "hakip2host", "puredns", "gotator"]
@@ -72,10 +72,10 @@ WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover", "urlfinder
 CRAWL_MODULES = ["katana", "gowitness"]
 
 # Content discovery, JS analysis, and quick-win vuln checks.
-DISCOVERY_MODULES = ["ffuf", "linkfinder", "paramfinder", "apifinder", "corscanner", "bypass403", "secretfinder"]
+DISCOVERY_MODULES = ["dirsearch", "ffuf", "linkfinder", "paramfinder", "apifinder", "js_intel", "corscanner", "bypass403", "secretfinder", "metascan", "wordlist_learner"]
 
-# Cloud storage / bucket exposure.
-CLOUD_MODULES = ["s3scanner", "cloud_enum"]
+# Cloud asset intelligence + storage / bucket exposure.
+CLOUD_MODULES = ["cloud_intel", "s3scanner", "cloud_enum"]
 
 # Full module set — everything.
 FULL_MODULES = (
@@ -120,7 +120,7 @@ SCAN_PROFILES: dict[str, dict[str, Any]] = {
         "module_config": {
             "naabu":   {"ports": "full"},
             "nuclei":  {"severity": "info,low,medium,high,critical"},
-            "ffuf":    {"wordlist": "big", "threads": 50},
+            "dirsearch": {"wordlist": "big", "concurrency": 30, "max_recursion_depth": 3},
         },
     },
 }

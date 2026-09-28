@@ -29,6 +29,7 @@ from ratelimit import RateLimiter
 from scope.types import Scope, ScopeStatus
 
 if TYPE_CHECKING:
+    from database.knowledge_base import KnowledgeBase
     from database.persister import Persister
     from modules.base import BaseModule
 
@@ -55,6 +56,12 @@ class ScanController:
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
+        # Adaptive Reconnaissance Planner
+        plan_mode: str = "default",          # passive-first | default | aggressive
+        plan_budget: int = 0,                # max module executions; 0 = unlimited
+        # Result output (Central Result Aggregator → results/<domain>/)
+        results_enabled: bool = True,
+        out_dir: str = "results",
         # Live CLI event stream (off for MCP/background runs).
         live: bool = False,
     ) -> None:
@@ -62,6 +69,14 @@ class ScanController:
         self._scope = scope
         self._bus = EventBus()
         self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
+        from planner import PlannerConfig, ReconPlanner
+        self._planner = ReconPlanner(
+            PlannerConfig(mode=plan_mode, max_executions=plan_budget)
+        )
+        self._aggregator = None
+        if results_enabled:
+            from output import ResultAggregator
+            self._aggregator = ResultAggregator(out_dir)
         self._ai_enabled = ai_enabled
         self._agent_enabled = agent_enabled
         self._enabled_modules = enabled_modules
@@ -73,6 +88,7 @@ class ScanController:
         self._max_agent_iterations = max_agent_iterations
         self._scan_id = uuid.uuid4()
         self._persister: Persister | None = None
+        self._knowledge_base: "KnowledgeBase | None" = None
         self._summary: dict[str, list] = {}
         self._scan_domain: str | None = None
         self._live = live
@@ -99,7 +115,14 @@ class ScanController:
             log.debug("out-of-scope (%s): %s", decision.reason, candidate)
             return False
 
+        # Feed the planner this event's context BEFORE its handlers dispatch, so
+        # technology/asset awareness reflects the event that triggered them.
+        self._planner.observe(event)
+
         accepted = await self._bus.publish(event)
+
+        if accepted and self._aggregator is not None:
+            self._aggregator.observe(event)
 
         if accepted:
             if self._live:
@@ -243,7 +266,25 @@ class ScanController:
 
         self.print_summary()
         from cli import ui
+        pstats = self._planner.stats
+        if pstats["skipped"] or self._planner.config.mode != "default":
+            print("\n" + ui.section("Planner", f"{pstats['mode']}"))
+            print(ui.info(
+                f"considered {pstats['considered']} · ran {pstats['ran']} · "
+                f"skipped {pstats['skipped']} · cost {pstats['cost_spent']}"))
+            for reason, n in sorted(pstats["skip_reasons"].items(), key=lambda kv: -kv[1])[:6]:
+                print(ui.bullet(f"{ui.paint(str(n), 'byellow')} skipped — {reason}", "grey"))
         print(ui.ok(ui.paint(f"done — {self._bus.seen_count} events total", "bgreen", bold=True)))
+
+        if self._aggregator is not None:
+            try:
+                import os as _os
+                scan_dir = self._aggregator.write(seed_domain)
+                base = _os.path.dirname(_os.path.dirname(scan_dir))
+                print(ui.ok(f"results written → {scan_dir}"))
+                print(ui.info(f"latest → {_os.path.join(base, 'latest')}"))
+            except Exception as exc:
+                log.error("failed to write results: %s", exc)
 
     # ── properties ────────────────────────────────────────────────────────────
 
@@ -260,9 +301,24 @@ class ScanController:
         return self._scope_engine
 
     @property
+    def knowledge_base(self) -> "KnowledgeBase | None":
+        """Persistent reconnaissance learning system (only when --db-url is given)."""
+        return self._knowledge_base
+
+    @property
+    def scan_domain(self) -> str | None:
+        """The seed domain of this scan (available once run() has started)."""
+        return self._scan_domain
+
+    @property
     def rate_limiter(self) -> RateLimiter:
         """Shared, WAF-aware rate limiter — used by every module, wrapper, and tool."""
         return self._rate_limiter
+
+    @property
+    def planner(self):
+        """Adaptive Reconnaissance Planner deciding which modules run."""
+        return self._planner
 
     @property
     def ai_enabled(self) -> bool:
@@ -282,6 +338,11 @@ class ScanController:
         factory = make_session_factory(engine)
         session = factory()
         self._persister = Persister(session)
+        # The knowledge base is cross-scan; give it its own session on the same
+        # engine so its (lock-serialized) writes never interleave with the
+        # persister's on a single shared AsyncSession.
+        from database.knowledge_base import KnowledgeBase
+        self._knowledge_base = KnowledgeBase(factory())
         scope_config = {
             "in_scope": [r.raw for r in self._scope.in_scope],
             "out_scope": [r.raw for r in self._scope.out_scope],
@@ -340,6 +401,13 @@ class ScanController:
                     continue
 
                 async def _handler(event: Event, m: "BaseModule" = module) -> None:
+                    # Adaptive planner decides whether this module is worth
+                    # running for this event. Scope + rate limiting still apply
+                    # to whatever it approves.
+                    dec = self._planner.evaluate(m, event)
+                    if not dec.run:
+                        log.debug("[plan] skip %s", dec.explain())
+                        return
                     try:
                         await m.handle_event(event)
                     except Exception as exc:
@@ -390,17 +458,24 @@ class ScanController:
         if self._persister:
             await self._persister.save_event(seed)
 
-        # Run all seed modules in parallel.
-        if seed_modules:
+        # Run seed modules the planner approves for the selected mode, in parallel.
+        approved_seeds = [m for m in seed_modules if self._planner.allow_seed(m).run]
+        skipped = [m.name for m in seed_modules if m not in approved_seeds]
+        if skipped:
+            log.info("[plan] seed modules skipped (%s mode): %s",
+                     self._planner.config.mode, ", ".join(skipped))
+        if approved_seeds:
             await asyncio.gather(
                 *[
                     asyncio.create_task(m.run(seed_domain, self._scan_id))
-                    for m in seed_modules
+                    for m in approved_seeds
                 ]
             )
 
-        # Let in-flight reactive tasks settle.
-        await asyncio.sleep(0.2)
+        # Wait for the reactive cascade (subdomain→resolve→probe→fuzz, incl. slow
+        # modules like ffuf/dirsearch) to go quiescent before teardown. Replaces
+        # a fixed 0.2s sleep that cancelled in-flight reactive tasks.
+        await self._bus.drain()
 
         # Call finish() on every module.
         for module in self._loaded_modules:

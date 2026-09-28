@@ -76,10 +76,10 @@ class ProbeUrlTool(AgentTool):
             return ToolResult(0, f"scope denied: {hostname}")
 
         from recon.httpx_wrap import HttpxWrapper
-        wrapper = HttpxWrapper()
+        wrapper = HttpxWrapper(self._controller)
 
         before = self._controller.bus.seen_count
-        await wrapper.probe_urls([target], self._controller.stamp_and_publish)
+        await wrapper.probe_urls([target], self._controller.stamp_and_publish, scan_id)
         after = self._controller.bus.seen_count
 
         new = after - before
@@ -106,7 +106,7 @@ class FetchHistoricalUrlsTool(AgentTool):
         wrapper = GauWrapper(limiter=get_limiter(self._controller))
 
         before = self._controller.bus.seen_count
-        await wrapper.fetch(target, self._controller.stamp_and_publish)
+        await wrapper.fetch(target, self._controller.stamp_and_publish, scan_id)
         after = self._controller.bus.seen_count
 
         new = after - before
@@ -138,7 +138,7 @@ class NucleiInfoTool(AgentTool):
         wrapper = NucleiWrapper(limiter=get_limiter(self._controller))
 
         before = self._controller.bus.seen_count
-        await wrapper.scan(target, self._controller.stamp_and_publish)
+        await wrapper.scan(target, self._controller.stamp_and_publish, scan_id)
         after = self._controller.bus.seen_count
 
         new = after - before

@@ -2,11 +2,17 @@
 Database models (SQLModel + SQLAlchemy).
 
 Tables:
-  scan_jobs       — one row per scan run
-  events          — every IN-scope event, deduped per (scan_job_id, dedup_key)
-  hosts           — aggregated host view updated as events arrive
-  findings        — FINDING_CANDIDATE events materialized as rows
-  ai_assessments  — LLM annotations written in Phase 3 (table created now, written later)
+  scan_jobs         — one row per scan run
+  events            — every IN-scope event, deduped per (scan_job_id, dedup_key)
+  hosts             — aggregated host view updated as events arrive
+  findings          — FINDING_CANDIDATE events materialized as rows
+  ai_assessments    — LLM annotations written in Phase 3 (table created now, written later)
+  vocabulary        — persistent reconnaissance learning system: reusable
+                      recon vocabulary (directories, files, endpoints, api paths,
+                      parameters, js identifiers, …) learned from observations,
+                      partitioned by knowledge scope (global / technology /
+                      target / organization). Unique per (scope, category, value).
+  vocabulary_targets — distinct (vocab row, target) sightings — backs target_count.
 """
 
 from __future__ import annotations
@@ -106,6 +112,75 @@ class Finding(SQLModel, table=True):
     evidence: Optional[Any] = Field(default=None, sa_column=Column(JSON))
     source_event_id: Optional[uuid.UUID] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+# ── VocabularyItem (persistent reconnaissance learning system) ──────────────────
+
+class VocabularyItem(SQLModel, table=True):
+    """One reusable reconnaissance vocabulary token, within one knowledge scope.
+
+    A candidate is a *proposal* learned from observation — never proof that a
+    resource exists. Uniqueness is DB-enforced on (scope_type, scope_key,
+    category, value) so concurrent processing can never create a duplicate: the
+    second inserter gets an IntegrityError and updates instead. Rarity stats and
+    confidence accumulate; provenance records the first sighting.
+
+    Knowledge scopes (scope_type / scope_key):
+      global       / ""           — across all targets and technologies
+      technology   / "<tech>"     — e.g. "wordpress", "iis"
+      target       / "<domain>"   — the scan's seed domain
+      organization / "<program>"  — an operator-supplied program/org label
+    """
+
+    __tablename__ = "vocabulary"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_type", "scope_key", "category", "value",
+            name="uq_vocab_scope_category_value",
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    scope_type: str = Field(index=True)       # global | technology | target | organization
+    scope_key: str = Field(default="", index=True)
+    category: str = Field(index=True)         # see recon.vocabulary.CATEGORIES
+    value: str = Field(index=True)            # the normalized token
+
+    # Usefulness / rarity statistics (objective) + derived confidence.
+    occurrence_count: int = Field(default=1)  # total sightings in this scope
+    target_count: int = Field(default=1)      # distinct targets it was seen on
+    confidence: float = Field(default=0.0, index=True)  # 0..1, recomputed on update
+    context: Optional[str] = Field(default=None)        # technology/context, extensible
+    first_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Provenance of the first sighting.
+    source_scan_id: Optional[uuid.UUID] = Field(default=None, index=True)
+    source_event_id: Optional[uuid.UUID] = Field(default=None)
+    source_url: Optional[str] = Field(default=None)     # path only, never a query string
+
+
+class VocabularyTarget(SQLModel, table=True):
+    """Distinct (scope, category, value, target) sightings — the source of truth
+    for target_count. Unique so a repeat sighting of the same word on the same
+    target under the same scope can never be double-counted, even concurrently.
+    """
+
+    __tablename__ = "vocabulary_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_type", "scope_key", "category", "value", "target",
+            name="uq_vocab_target",
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    scope_type: str = Field(index=True)
+    scope_key: str = Field(default="", index=True)
+    category: str = Field(index=True)
+    value: str = Field(index=True)
+    target: str = Field(index=True)
+    first_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ── AiAssessment (Phase 3 stub) ────────────────────────────────────────────────

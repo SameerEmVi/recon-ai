@@ -4,7 +4,7 @@ httpx_probe — HTTP/HTTPS service probing via the httpx binary.
 Reactive module. Probes three ways:
   - SUBDOMAIN  → probe the HOSTNAME (so httpx sends the right Host header and we
                  hit the real name-based virtual host, not the IP's default vhost).
-                 This is what makes ffuf/nuclei/fingerprint/etc. target real
+                 This is what makes dirsearch/nuclei/fingerprint/etc. target real
                  content, and it works without the resolved IP being in scope.
   - IP         → probe the IP on common HTTP ports.
   - OPEN_PORT  → probe that specific host:port.

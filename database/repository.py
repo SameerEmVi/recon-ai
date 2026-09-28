@@ -12,11 +12,19 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import AiAssessment, EventRecord, Finding, Host, ScanJob
+from database.models import (
+    AiAssessment,
+    EventRecord,
+    Finding,
+    Host,
+    ScanJob,
+    VocabularyItem,
+    VocabularyTarget,
+)
 from events.types import EventType
 
 if TYPE_CHECKING:
@@ -265,3 +273,123 @@ class FindingRepository:
             .order_by(Finding.category, Finding.host)
         )
         return list(result.scalars())
+
+
+# ── VocabularyRepository (persistent reconnaissance learning system) ─────────────
+
+class VocabularyRepository:
+    """Low-level DB access for the persistent recon-vocabulary store.
+
+    Deliberately thin: uniqueness is DB-enforced (UniqueConstraints on
+    VocabularyItem / VocabularyTarget), so a duplicate insert fails cleanly and
+    the caller updates instead. Learn orchestration (normalize → quality-filter →
+    check → insert/update → score) lives in ``database.knowledge_base``.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def get_item(
+        self, scope_type: str, scope_key: str, category: str, value: str
+    ) -> "VocabularyItem | None":
+        result = await self._s.execute(
+            select(VocabularyItem).where(
+                VocabularyItem.scope_type == scope_type,
+                VocabularyItem.scope_key == scope_key,
+                VocabularyItem.category == category,
+                VocabularyItem.value == value,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def add_item(self, item: VocabularyItem) -> bool:
+        """Insert a new vocabulary row. Returns False if it already exists
+        (unique-constraint race) — the caller should then fall back to update."""
+        self._s.add(item)
+        try:
+            await self._s.commit()
+            return True
+        except IntegrityError:
+            await self._s.rollback()
+            return False
+
+    async def save_item(self, item: VocabularyItem) -> None:
+        """Persist mutations to an already-loaded item."""
+        self._s.add(item)
+        await self._s.commit()
+
+    async def target_seen(
+        self, scope_type: str, scope_key: str, category: str, value: str, target: str
+    ) -> bool:
+        """Record a distinct (scope, category, value, target) sighting.
+
+        Returns True if this is the FIRST time this value was seen on this target
+        in this scope (i.e. target_count should be incremented), False if it was
+        already recorded."""
+        row = VocabularyTarget(
+            scope_type=scope_type, scope_key=scope_key,
+            category=category, value=value, target=target,
+        )
+        self._s.add(row)
+        try:
+            await self._s.commit()
+            return True
+        except IntegrityError:
+            await self._s.rollback()
+            return False
+
+    async def list_items(
+        self,
+        scope_type: str,
+        scope_key: str,
+        category: str,
+        *,
+        min_target_count: int = 1,
+        min_occurrence: int = 1,
+        min_confidence: float = 0.0,
+        limit: int | None = None,
+    ) -> list["VocabularyItem"]:
+        stmt = (
+            select(VocabularyItem)
+            .where(
+                VocabularyItem.scope_type == scope_type,
+                VocabularyItem.scope_key == scope_key,
+                VocabularyItem.category == category,
+                VocabularyItem.target_count >= min_target_count,
+                VocabularyItem.occurrence_count >= min_occurrence,
+                VocabularyItem.confidence >= min_confidence,
+            )
+            .order_by(
+                VocabularyItem.target_count.desc(),
+                VocabularyItem.occurrence_count.desc(),
+                VocabularyItem.confidence.desc(),
+                VocabularyItem.value.asc(),
+            )
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self._s.execute(stmt)
+        return list(result.scalars())
+
+    async def stats(
+        self, scope_type: str | None = None, scope_key: str | None = None
+    ) -> dict:
+        """Return {'total': N, 'by_category': {...}, 'by_scope': {...}}."""
+        conds = []
+        if scope_type is not None:
+            conds.append(VocabularyItem.scope_type == scope_type)
+        if scope_key is not None:
+            conds.append(VocabularyItem.scope_key == scope_key)
+
+        cat_stmt = select(VocabularyItem.category, func.count()).group_by(VocabularyItem.category)
+        scope_stmt = select(VocabularyItem.scope_type, func.count()).group_by(VocabularyItem.scope_type)
+        total_stmt = select(func.count()).select_from(VocabularyItem)
+        for c in conds:
+            cat_stmt = cat_stmt.where(c)
+            scope_stmt = scope_stmt.where(c)
+            total_stmt = total_stmt.where(c)
+
+        by_cat = {row[0]: row[1] for row in (await self._s.execute(cat_stmt)).all()}
+        by_scope = {row[0]: row[1] for row in (await self._s.execute(scope_stmt)).all()}
+        total = (await self._s.execute(total_stmt)).scalar_one()
+        return {"total": total, "by_category": by_cat, "by_scope": by_scope}

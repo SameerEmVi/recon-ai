@@ -53,7 +53,7 @@ def test_registry_discovers_all_expected_modules():
         "subfinder", "dnsx", "naabu", "httpx_probe", "katana", "gowitness",
         "dnsbrute", "permutations",
         # web
-        "gau", "nuclei", "fingerprint", "ffuf", "linkfinder", "corscanner", "bypass403",
+        "gau", "nuclei", "fingerprint", "dirsearch", "linkfinder", "corscanner", "bypass403",
     ]
     for name in expected:
         assert name in names, f"module '{name}' not found in registry"
@@ -179,7 +179,12 @@ def test_passive_modules_have_passive_flag(mod_name):
     assert "passive" in m.flags, f"{mod_name} should have 'passive' flag"
 
 
-@pytest.mark.parametrize("mod_name", PASSIVE_MODULES)
+# wayback is passive but intentionally reactive (per-host, watches SUBDOMAIN) so
+# every enumerated subdomain gets its own CDX query — a domain-wide seed query is
+# sorted apex-first and starves subdomains under the limit. The rest are seeds.
+@pytest.mark.parametrize(
+    "mod_name", [m for m in PASSIVE_MODULES if m != "wayback"]
+)
 def test_passive_modules_are_seed(mod_name):
     ctrl = _mock_controller()
     m = ModuleRegistry.load(names=[mod_name], controller=ctrl)[0]
@@ -288,16 +293,26 @@ async def test_hackertarget_emits_subdomains_and_ips():
 
 # ── wayback: mocked httpx ─────────────────────────────────────────────────────
 
-async def test_wayback_emits_urls_and_subdomains():
+def _subdomain_event(hostname: str):
+    """A minimal SUBDOMAIN-like event for driving reactive modules."""
+    from events.types import EventType, SubdomainData
+    event = MagicMock()
+    event.type = EventType.SUBDOMAIN
+    event.data = SubdomainData(hostname=hostname, source="test")
+    event.id = uuid.uuid4()
+    event.distance = 1
+    return event
+
+
+async def test_wayback_queries_per_host_and_emits_urls():
     ctrl = _mock_controller()
     m = ModuleRegistry.load(names=["wayback"], controller=ctrl)[0]
 
     fake_response = MagicMock()
     fake_response.json.return_value = [
         ["original"],  # header row
-        ["https://api.example.com/v1/users"],
-        ["https://api.example.com/v1/items"],
-        ["https://mail.example.com/login"],
+        ["https://awatere.example.com/_hcms/mem/login"],
+        ["https://awatere.example.com/about"],
     ]
     fake_response.raise_for_status = MagicMock()
 
@@ -307,15 +322,37 @@ async def test_wayback_emits_urls_and_subdomains():
     fake_client.get = AsyncMock(return_value=fake_response)
 
     with patch("httpx.AsyncClient", return_value=fake_client):
-        await m.run("example.com", ctrl.scan_id)
+        await m.handle_event(_subdomain_event("awatere.example.com"))
+
+    # The per-host CDX query must target the specific host (not a domain wildcard).
+    _, kwargs = fake_client.get.call_args
+    assert kwargs["params"]["url"] == "awatere.example.com/*"
 
     calls = [c[0][0] for c in ctrl.stamp_and_publish.call_args_list]
     urls = {e.data.url for e in calls if hasattr(e.data, "url")}
-    hostnames = {e.data.hostname for e in calls if hasattr(e.data, "hostname")}
+    assert "https://awatere.example.com/_hcms/mem/login" in urls
+    assert "https://awatere.example.com/about" in urls
 
-    assert "https://api.example.com/v1/users" in urls
-    assert "api.example.com" in hostnames
-    assert "mail.example.com" in hostnames
+
+async def test_wayback_dedups_repeated_hosts():
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["wayback"], controller=ctrl)[0]
+
+    fake_response = MagicMock()
+    fake_response.json.return_value = [["original"], ["https://x.example.com/a"]]
+    fake_response.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.get = AsyncMock(return_value=fake_response)
+
+    with patch("httpx.AsyncClient", return_value=fake_client):
+        await m.handle_event(_subdomain_event("x.example.com"))
+        await m.handle_event(_subdomain_event("x.example.com"))  # same host again
+
+    # Second call for the same host must not re-query the archive.
+    assert fake_client.get.call_count == 1
 
 
 # ── fingerprint module ────────────────────────────────────────────────────────
@@ -555,18 +592,9 @@ def test_gowitness_watches_http_service():
     assert "gowitness" in m.deps_binary
 
 
-# ── ffuf module ───────────────────────────────────────────────────────────────
+# ── content-discovery wordlists ───────────────────────────────────────────────
 
-def test_ffuf_watches_http_service():
-    ctrl = _mock_controller()
-    m = ModuleRegistry.load(names=["ffuf"], controller=ctrl)[0]
-    assert "HTTP_SERVICE" in m.watched_events
-    assert "URL" in m.produced_events
-    assert m.opt("wordlist") == "common"
-    assert m.opt("threads") == 40
-
-
-def test_ffuf_bundled_wordlist_exists():
+def test_bundled_wordlist_exists():
     from pathlib import Path
     wl_dir = Path(__file__).parent.parent.parent / "wordlists"
     common = wl_dir / "common.txt"

@@ -82,6 +82,17 @@ class RateLimiter:
         return self._penalty
 
     @property
+    def rate_per_sec(self) -> float | None:
+        """Configured static rate (req/s), or None if unlimited. Read-only —
+        lets subprocess wrappers (ffuf -rate, …) honour the scan-wide -r."""
+        return self._rate
+
+    @property
+    def max_concurrency(self) -> int | None:
+        """Configured global concurrency cap, or None if unlimited."""
+        return self._max_conc
+
+    @property
     def waf_vendors(self) -> set[str]:
         return set(self._waf_seen)
 
