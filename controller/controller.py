@@ -484,13 +484,18 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
 
-        # Phase 3: LLM triage.
+        # Phase 3a: LLM correlation & intelligence (works without a DB — operates
+        # on the aggregator's in-memory structured evidence, attached to the writer).
+        if self._ai_enabled and self._anthropic_api_key and self._aggregator is not None:
+            await self._run_intelligence(seed_domain)
+        elif self._ai_enabled and not self._anthropic_api_key:
+            log.warning("--ai set but ANTHROPIC_API_KEY not found — intelligence skipped")
+
+        # Phase 3b: DB-backed LLM triage (host/finding annotation).
         if self._ai_enabled and self._persister and self._anthropic_api_key:
             await self._run_triage(seed_domain)
-        elif self._ai_enabled and not self._anthropic_api_key:
-            log.warning("--ai set but ANTHROPIC_API_KEY not found — triage skipped")
-        elif self._ai_enabled and not self._persister:
-            log.warning("--ai requires --db-url for triage — skipped")
+        elif self._ai_enabled and not self._persister and self._anthropic_api_key:
+            log.info("--ai without --db-url: intelligence ran, DB triage skipped")
 
         # Phase 4: constrained agent loop.
         if self._agent_enabled and self._persister and self._anthropic_api_key:
@@ -499,6 +504,49 @@ class ScanController:
             log.warning("--agent set but ANTHROPIC_API_KEY not found — agent skipped")
         elif self._agent_enabled and not self._persister:
             log.warning("--agent requires --db-url — agent skipped")
+
+    async def _run_intelligence(self, target_domain: str) -> None:
+        """LLM correlation pass over the aggregator's structured evidence.
+        Read-only reasoning: it produces leads and attaches them to the writer,
+        it never takes a recon action or touches scope."""
+        agg = self._aggregator
+        if agg is None:
+            return
+        from ai.correlate import (
+            IntelligenceAnalyst,
+            render_intelligence_txt,
+            render_summary_sections,
+        )
+        try:
+            analyst = IntelligenceAnalyst(
+                api_key=self._anthropic_api_key,  # type: ignore[arg-type]
+                model=self._ai_model,
+            )
+            diff_new = agg.new_domains_vs_latest(target_domain)
+            report = await analyst.analyze(agg, target=target_domain, diff_new=diff_new)
+        except Exception as exc:
+            log.error("intelligence pass failed: %s", exc)
+            return
+
+        if report.is_empty:
+            log.info("intelligence: no verifiable leads produced")
+            return
+
+        agg.attach_intelligence(
+            render_intelligence_txt(report), render_summary_sections(report)
+        )
+        try:
+            from cli import ui
+            print(ui.paint("\n  LLM INTELLIGENCE", "bcyan", bold=True))
+            for f in report.findings[:8]:
+                print(f"  [{f.interest}] {f.title}  ({f.status}/{f.confidence})")
+            if report.recommended_next:
+                print(ui.info("next recon → " + ", ".join(
+                    n.module for n in report.recommended_next[:5])))
+            if report.dropped:
+                print(ui.info(f"{report.dropped} unverifiable model claim(s) discarded"))
+        except Exception:
+            pass
 
     async def _run_triage(self, target_domain: str) -> None:
         from ai.triage import Triage

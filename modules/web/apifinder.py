@@ -82,6 +82,63 @@ _MIME_RE = re.compile(r"^[a-z]+/[a-z0-9.+\-]+$")
 _FETCH_EXT = {"", ".js", ".mjs", ".json", ".html", ".htm"}
 
 
+# Statuses that positively confirm a well-known path is NOT there.
+_ABSENT_STATUSES = frozenset({404, 410})
+
+# Statuses that neither confirm nor deny existence — a WAF/CDN block, a rate
+# limit, or an origin-unreachable edge error. A Cloudflare-fronted host answers
+# these (not 404) to *every* path, so treating them as "something is here"
+# fabricated phantom swagger/openapi endpoints. They confirm nothing → dropped.
+# (Cloudflare 520-527 = origin errors; 429/503 = throttle/unavailable.)
+_INCONCLUSIVE_STATUSES = frozenset(
+    {429, 503, 520, 521, 522, 523, 524, 525, 526, 527}
+)
+
+# API-doc classifications whose *value* is a readable spec: we require the body
+# to actually look like one before emitting, so a soft-404 / SPA index page
+# served at /openapi.json is not reported as an OpenAPI doc.
+_DOC_TAGS = frozenset({"swagger", "openapi", "api-docs"})
+
+
+class _Baseline:
+    """A host's learned catch-all response (status + body size).
+
+    A CDN/WAF/SPA origin returns a uniform response to *any* path — the same
+    status, and usually the same body (a block page or the SPA index). A
+    well-known path whose response is indistinguishable from that baseline is
+    noise, not a discovered endpoint, and is dropped.
+    """
+
+    __slots__ = ("status", "size")
+
+    def __init__(self, status: int, size: int) -> None:
+        self.status = status
+        self.size = size
+
+    def matches(self, status: int | None, text: str | None) -> bool:
+        if status != self.status:
+            return False
+        size = len(text or "")
+        return abs(size - self.size) <= max(64, int(self.size * 0.05))
+
+
+def _looks_like_api_doc(text: str | None, url: str) -> bool:
+    """True if `text` plausibly IS an OpenAPI/Swagger spec or Swagger-UI page.
+
+    Deterministic, body-only. A 200 that returns the site's HTML shell (SPA
+    catch-all) or a generic error page does not qualify.
+    """
+    if not text:
+        return False
+    sample = text[:8192].lower()
+    if "swagger" in sample or "openapi" in sample or "redoc" in sample:
+        return True
+    # A JSON spec that omits the literal words but has the OpenAPI paths map.
+    if sample.lstrip().startswith(("{", "[")) and '"paths"' in sample:
+        return True
+    return False
+
+
 def _origin(url: str) -> str:
     p = urlparse(url)
     if not p.scheme or not p.netloc:
@@ -224,10 +281,15 @@ class ApiFinderModule(BaseModule):
         "timeout": 20,
         "max_body_kb": 1024,
         "max_urls": 500,
-        # Emit configured well-known API/doc candidate paths for each live
-        # HTTP service so the rest of the pipeline probes them. Config, not
-        # the sole mechanism — JS/HTML extraction is primary.
+        # Emit configured well-known API/doc paths for each live HTTP service.
+        # Config, not the sole mechanism — JS/HTML extraction is primary.
         "probe_well_known": True,
+        # Verify each well-known path resolves to a real, distinct resource
+        # before emitting it: drops 404/unreachable, WAF/CDN inconclusive
+        # statuses, catch-all/soft-404 responses, and doc paths whose body is
+        # not actually a spec. Off = the old blind behaviour (every path
+        # emitted as a candidate, which fabricated N_paths × N_hosts phantoms).
+        "verify_well_known": True,
         "well_known_paths": [
             "/api/", "/api/v1/", "/api/v2/", "/api/v3/",
             "/graphql", "/graphiql", "/graphql/schema",
@@ -255,10 +317,16 @@ class ApiFinderModule(BaseModule):
             if self.opt("probe_well_known"):
                 origin = _origin(base)
                 if origin:
+                    # Learn the host's catch-all baseline first so a CDN/WAF/SPA
+                    # that answers uniformly to every path can't fabricate
+                    # endpoints (see _learn_catch_all / _Baseline).
+                    baseline = (
+                        await self._learn_catch_all(origin)
+                        if self.opt("verify_well_known")
+                        else None
+                    )
                     for path in self.opt("well_known_paths") or []:
-                        await self._emit_url_and_derived(
-                            origin + path, event, "api-discovery"
-                        )
+                        await self._probe_well_known(origin + path, event, baseline)
             # 2. Fetch the service's own HTML and extract references from it.
             await self._fetch_and_extract(base, event)
 
@@ -276,6 +344,90 @@ class ApiFinderModule(BaseModule):
         text = await self._fetch(url)
         if text:
             await self._process_text(text, url, event)
+
+    async def _learn_catch_all(self, origin: str) -> _Baseline | None:
+        """Probe two random non-existent paths to learn a host's catch-all.
+
+        A well-behaved host 404s a random path (→ no baseline). A CDN/WAF/SPA
+        answers uniformly (same 200 index / 403 block / 503) to everything; we
+        capture that (status + body size) so identical well-known responses are
+        recognised as noise. Returns None when no stable catch-all is seen.
+        """
+        import secrets
+
+        samples: list[tuple[int, int]] = []
+        for _ in range(2):
+            rnd = f"{origin}/{secrets.token_hex(10)}-nonexistent-probe"
+            status, text = await self._probe(rnd)
+            if status is None or status in _ABSENT_STATUSES:
+                return None  # a real 404 / unreachable → no catch-all problem
+            samples.append((status, len(text or "")))
+        (s0, l0), (s1, l1) = samples
+        if s0 == s1 and abs(l0 - l1) <= max(64, int(l0 * 0.05)):
+            return _Baseline(s0, (l0 + l1) // 2)
+        return None
+
+    async def _probe_well_known(
+        self, url: str, event: Event, baseline: _Baseline | None
+    ) -> None:
+        """Confirm a well-known API/doc path exists before emitting it.
+
+        Blindly emitting the configured path list turned every entry into a
+        phantom endpoint on every host. We GET each path and emit only those
+        that genuinely resolve to a distinct, real resource:
+
+          - a 404/410 or unreachable host is dropped;
+          - a WAF/CDN inconclusive status (429/503/520-527) confirms nothing;
+          - a response indistinguishable from the host's catch-all baseline
+            (CDN block page / SPA index) is dropped;
+          - an API-doc path must return a body that actually looks like a spec,
+            so a soft-404 HTML shell at /openapi.json is not called OpenAPI.
+
+        A confirmed 2xx doc is additionally mined for real references.
+        """
+        if not self.opt("verify_well_known"):
+            await self._emit_url_and_derived(url, event, "api-discovery")
+            return
+        status, text = await self._probe(url)
+        if status is None or status in _ABSENT_STATUSES:
+            return
+        if status in _INCONCLUSIVE_STATUSES:
+            return
+        if baseline is not None and baseline.matches(status, text):
+            return
+        if classify_api_url(url) in _DOC_TAGS:
+            # The value of a doc path is the readable spec — require it.
+            if not (200 <= status < 300):
+                return
+            if text is not None and not _looks_like_api_doc(text, url):
+                return
+        await self._emit_url_and_derived(url, event, "api-discovery")
+        if text:
+            await self._process_text(text, url, event)
+
+    async def _probe(self, url: str) -> tuple[int | None, str | None]:
+        """GET `url` through the shared limiter; return (status_code, body|None).
+
+        Body is returned only for a size-capped 2xx response. Returns
+        (None, None) on any transport failure. Never raises.
+        """
+        try:
+            import httpx
+        except ImportError:
+            self._log.warning("httpx not installed")
+            return None, None
+        try:
+            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+                async with self.guard(f"http:{urlparse(url).hostname or url}"):
+                    r = await client.get(url, follow_redirects=True)
+                self.inspect_response(r)
+                text = None
+                if 200 <= r.status_code < 300 and len(r.content) / 1024 <= self.opt("max_body_kb"):
+                    text = r.text
+                return r.status_code, text
+        except Exception as exc:
+            self._log.debug("apifinder: probe failed for %s: %s", url, exc)
+            return None, None
 
     async def _fetch(self, url: str) -> str | None:
         """Fetch a body through the shared rate limiter / WAF backoff."""

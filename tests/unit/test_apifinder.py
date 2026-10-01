@@ -30,6 +30,7 @@ from modules.web.apifinder import (
     params_from_url,
     resolve_ref,
     _is_fetchable,
+    _looks_like_api_doc,
 )
 from scope.engine import ScopeEngine
 from scope.types import Scope, ScopeStatus
@@ -259,26 +260,168 @@ async def test_scope_enforcement_respects_out_scope_deny():
 
 # ── well-known API/doc candidates on a live service ──────────────────────────
 
-async def test_http_service_emits_well_known_candidates():
+def _http_service_event(url="https://example.com/"):
     from events.types import HttpServiceData
-
-    ctrl = _mock_controller()
-    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
-
     ev = types.SimpleNamespace()
     ev.id = uuid.uuid4()
     ev.distance = 1
     ev.type = EventType.HTTP_SERVICE
-    ev.data = HttpServiceData(url="https://example.com/", status_code=200)
+    ev.data = HttpServiceData(url=url, status_code=200)
+    return ev
 
-    # Fetching the base page would hit the network — disable it, keep candidates.
-    m._fetch_and_extract = AsyncMock(return_value=None)
-    await m.handle_event(ev)
+
+async def test_http_service_emits_only_confirmed_well_known_paths():
+    # Every well-known path probes 200 → all are emitted as confirmed.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)   # skip base-page fetch
+    m._learn_catch_all = AsyncMock(return_value=None)     # host is not catch-all
+    m._probe = AsyncMock(return_value=(200, None))        # every path "exists"
+
+    await m.handle_event(_http_service_event())
 
     urls = {u.url for u in _emitted(ctrl, EventType.URL)}
     assert "https://example.com/graphql" in urls
     assert "https://example.com/openapi.json" in urls
     assert "https://example.com/api/v1/" in urls
+
+
+async def test_well_known_paths_absent_are_dropped():
+    # A 404 (or unreachable host → None) must NOT be emitted. This is the bug
+    # fix: blindly emitting the path list fabricated phantom endpoints.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._learn_catch_all = AsyncMock(return_value=None)
+
+    async def fake_probe(url):
+        if url.endswith("/graphql"):
+            return 200, None            # this one is real
+        if url.endswith("/openapi.json"):
+            return None, None           # host/path unreachable
+        return 404, None                # everything else confirmed absent
+
+    m._probe = AsyncMock(side_effect=fake_probe)
+    await m.handle_event(_http_service_event())
+
+    urls = {u.url for u in _emitted(ctrl, EventType.URL)}
+    assert urls == {"https://example.com/graphql"}
+
+
+async def test_verify_off_restores_blind_emit():
+    # verify_well_known=False = legacy behaviour: emit every configured path.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._config["verify_well_known"] = False
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._probe = AsyncMock(side_effect=AssertionError("should not probe when verify off"))
+
+    await m.handle_event(_http_service_event())
+
+    urls = {u.url for u in _emitted(ctrl, EventType.URL)}
+    assert "https://example.com/graphql" in urls
+    assert "https://example.com/v3/api-docs" in urls
+
+
+async def test_live_well_known_doc_body_is_mined():
+    # A confirmed 2xx spec body is mined for real references.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._learn_catch_all = AsyncMock(return_value=None)
+
+    async def fake_probe(url):
+        if url.endswith("/openapi.json"):
+            return 200, '{"paths": {"/api/v1/secret-users": {}}}'
+        return 404, None
+
+    m._probe = AsyncMock(side_effect=fake_probe)
+    await m.handle_event(_http_service_event())
+
+    urls = {u.url for u in _emitted(ctrl, EventType.URL)}
+    assert "https://example.com/openapi.json" in urls
+    assert "https://example.com/api/v1/secret-users" in urls
+
+
+# ── catch-all / WAF / soft-404 handling (the Cloudflare phantom-endpoint bug) ─
+
+async def test_cdn_catch_all_200_drops_all_well_known():
+    # A CDN/SPA that returns the SAME 200 index for every path (incl. random
+    # junk) must yield NO well-known endpoints — they're indistinguishable
+    # from the catch-all baseline.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._probe = AsyncMock(return_value=(200, "<html><body>welcome</body></html>"))
+
+    await m.handle_event(_http_service_event())
+
+    assert _emitted(ctrl, EventType.URL) == []
+    assert _emitted(ctrl, EventType.ENDPOINT) == []
+    assert _emitted(ctrl, EventType.TECHNOLOGY) == []
+
+
+async def test_waf_403_to_everything_not_reported_as_swagger():
+    # Cloudflare answering 403 to every path (the real-world case) must not be
+    # surfaced as swagger/openapi endpoints or a Swagger/OpenAPI technology.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._probe = AsyncMock(return_value=(403, None))   # body only captured for 2xx
+
+    await m.handle_event(_http_service_event())
+
+    urls = {u.url for u in _emitted(ctrl, EventType.URL)}
+    techs = {t.name for t in _emitted(ctrl, EventType.TECHNOLOGY)}
+    assert urls == set()
+    assert "Swagger/OpenAPI" not in techs
+
+
+async def test_inconclusive_status_not_emitted():
+    # A 503 / rate-limit / origin-error confirms nothing → dropped, even with
+    # no learnable baseline.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._learn_catch_all = AsyncMock(return_value=None)
+    m._probe = AsyncMock(return_value=(503, None))
+
+    await m.handle_event(_http_service_event())
+
+    assert _emitted(ctrl, EventType.URL) == []
+
+
+async def test_doc_path_without_spec_body_is_rejected():
+    # A 200 at /openapi.json whose body is an HTML shell (soft-404) is NOT an
+    # OpenAPI doc; a real JSON spec at /swagger.json is.
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["apifinder"], controller=ctrl)[0]
+    m._fetch_and_extract = AsyncMock(return_value=None)
+    m._learn_catch_all = AsyncMock(return_value=None)
+
+    async def fake_probe(url):
+        if url.endswith("/openapi.json"):
+            return 200, "<!doctype html><html>app shell</html>"   # not a spec
+        if url.endswith("/swagger.json"):
+            return 200, '{"openapi":"3.0.0","paths":{"/pets":{}}}'  # real spec
+        return 404, None
+
+    m._probe = AsyncMock(side_effect=fake_probe)
+    await m.handle_event(_http_service_event())
+
+    urls = {u.url for u in _emitted(ctrl, EventType.URL)}
+    assert "https://example.com/openapi.json" not in urls
+    assert "https://example.com/swagger.json" in urls
+
+
+def test_looks_like_api_doc():
+    assert _looks_like_api_doc('{"openapi":"3.0.0","paths":{}}', "https://e.com/openapi.json")
+    assert _looks_like_api_doc('{"swagger":"2.0"}', "https://e.com/swagger.json")
+    assert _looks_like_api_doc('{"paths":{"/x":{}}}', "https://e.com/v2/api-docs")
+    assert _looks_like_api_doc("<html>...swagger-ui...</html>", "https://e.com/swagger-ui.html")
+    assert not _looks_like_api_doc("<!doctype html><html>login</html>", "https://e.com/openapi.json")
+    assert not _looks_like_api_doc("", "https://e.com/openapi.json")
+    assert not _looks_like_api_doc(None, "https://e.com/openapi.json")
 
 
 # ── registration / wiring ────────────────────────────────────────────────────

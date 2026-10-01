@@ -54,36 +54,49 @@ class SecretFinderModule(BaseModule):
                 return True
         return False
 
-    async def handle_event(self, event: Event) -> None:
-        # Resolve the URL to fetch and (for URL events) gate on text-like content.
-        if event.type is EventType.HTTP_SERVICE:
-            url = event.data.url
-        else:  # URL event
-            url = event.data.url
-            if not self._should_fetch_url(url, getattr(event.data, "content_type", None)):
-                return
-        if not url:
-            return
+    def _target_url(self, event: Event) -> str | None:
+        """URL to fetch for `event`, or None (URL events are gated on text-like content)."""
+        url = event.data.url
+        if event.type is EventType.URL and not self._should_fetch_url(
+            url, getattr(event.data, "content_type", None)
+        ):
+            return None
+        return url or None
 
+    async def _fetch(self, url: str) -> tuple[str, int] | None:
+        """Fetch `url` through the shared limiter + WAF backoff → (body, status).
+
+        Error responses are NOT discarded: a 4xx/5xx debug page or stack trace
+        that dumps env/config is one of the likeliest places a secret leaks.
+        None only on transport failure / oversize body.
+        """
         try:
             import httpx
         except ImportError:
             self._log.warning("httpx not installed")
-            return
+            return None
 
         try:
             async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{urlparse(url).hostname or url}"):
                     r = await client.get(url, follow_redirects=True)
                 self.inspect_response(r)
-                r.raise_for_status()
                 if len(r.content) / 1024 > self.opt("max_body_kb"):
-                    self._log.debug("secretfinder: %s too large — skipping", url)
-                    return
-                body = r.text
+                    self._log.debug("%s: %s too large — skipping", self.name, url)
+                    return None
+                return r.text, r.status_code
         except Exception as exc:
-            self._log.debug("secretfinder: fetch failed for %s: %s", url, exc)
+            self._log.debug("%s: fetch failed for %s: %s", self.name, url, exc)
+            return None
+
+    async def handle_event(self, event: Event) -> None:
+        url = self._target_url(event)
+        if not url:
             return
+        fetched = await self._fetch(url)
+        if fetched is None:
+            return
+        body, status = fetched
 
         from recon.secrets import scan_text
         matches = scan_text(body, include_entropy=self.opt("include_entropy"))
@@ -91,15 +104,18 @@ class SecretFinderModule(BaseModule):
             return
 
         host = urlparse(url).hostname or url
+        where = f"an HTTP {status} error page at {url}" if status >= 400 else f"web content at {url}"
         count = 0
         for sec in matches:
             emitted = await self.emit(
                 EventType.FINDING_CANDIDATE,
                 FindingCandidateData(
                     host=host,
-                    title=f"Exposed secret: {sec.name}",
+                    # Redacted value in the title keeps distinct keys of the same
+                    # type on one host from collapsing under the finding dedup key.
+                    title=f"Exposed secret: {sec.name} ({sec.redacted})",
                     description=(
-                        f"A {sec.name} was found exposed in web content at {url}. "
+                        f"A {sec.name} was found exposed in {where}. "
                         f"Value redacted: {sec.redacted}. Verify it is live and "
                         f"rotate/revoke if valid."
                     ),
@@ -110,6 +126,7 @@ class SecretFinderModule(BaseModule):
                         "match_redacted": sec.redacted,   # never the full secret
                         "location": url[:512],
                         "offset": sec.index,
+                        "http_status": status,
                     },
                 ),
                 source_event=event,

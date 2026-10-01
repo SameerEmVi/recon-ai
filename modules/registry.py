@@ -72,16 +72,21 @@ WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover", "urlfinder
 CRAWL_MODULES = ["katana", "gowitness"]
 
 # Content discovery, JS analysis, and quick-win vuln checks.
-DISCOVERY_MODULES = ["dirsearch", "ffuf", "linkfinder", "paramfinder", "apifinder", "js_intel", "corscanner", "bypass403", "secretfinder", "metascan", "wordlist_learner"]
+DISCOVERY_MODULES = ["dirsearch", "ffuf", "linkfinder", "paramfinder", "apifinder", "js_intel", "corscanner", "bypass403", "secretfinder", "trufflehog", "metascan", "wordlist_learner"]
 
 # Cloud asset intelligence + storage / bucket exposure.
 CLOUD_MODULES = ["cloud_intel", "s3scanner", "cloud_enum"]
+
+# Horizontal discovery: sibling ROOT domains owned by the same org (reported,
+# never scanned). Passive (DoH + crt.sh), so safe to include in the fast profile.
+RELATED_MODULES = ["related_domains"]
 
 # Full module set — everything.
 FULL_MODULES = (
     DEFAULT_MODULES
     + PASSIVE_MODULES
     + EXTRA_PASSIVE_MODULES
+    + RELATED_MODULES
     + DEEP_DNS_MODULES
     + WEB_MODULES
     + ["naabu", "nmap"]
@@ -95,7 +100,7 @@ FULL_MODULES = (
 SCAN_PROFILES: dict[str, dict[str, Any]] = {
     "fast": {
         "description": "Passive only — safe subdomain enumeration, no active probing",
-        "modules": PASSIVE_MODULES + EXTRA_PASSIVE_MODULES + ["dnsx"],
+        "modules": PASSIVE_MODULES + EXTRA_PASSIVE_MODULES + RELATED_MODULES + ["dnsx"],
         "module_config": {},
     },
     "default": {

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from events.dedup import derive_dedup_key
 from events.types import EventType, HttpServiceData, UrlData
 from modules.registry import ModuleRegistry
 from recon.secrets import redact, scan_text, shannon_entropy
@@ -66,11 +67,11 @@ def test_redact_and_entropy_helpers():
 
 # ── module ────────────────────────────────────────────────────────────────────
 
-def _fake_client(body: str):
+def _fake_client(body: str, status: int = 200):
     resp = MagicMock()
     resp.text = body
     resp.content = body.encode()
-    resp.status_code = 200
+    resp.status_code = status
     resp.raise_for_status = MagicMock()
     client = MagicMock()
     client.__aenter__ = AsyncMock(return_value=client)
@@ -118,3 +119,49 @@ async def test_module_skips_non_text_url():
     # never even constructed a client for a non-text URL
     p.assert_not_called()
     assert not ctrl.stamp_and_publish.called
+
+
+def _service_event(url: str = "https://app.example.com/"):
+    event = MagicMock()
+    event.type = EventType.HTTP_SERVICE
+    event.data = HttpServiceData(url=url, status_code=200)
+    event.id = uuid.uuid4()
+    event.distance = 2
+    return event
+
+
+async def test_error_page_is_scanned_and_status_recorded():
+    # A 500 debug page dumping env is a prime leak location — must not be dropped.
+    ModuleRegistry.discover()
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["secretfinder"], controller=ctrl)[0]
+
+    body = "Traceback ... AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+    with patch("httpx.AsyncClient", return_value=_fake_client(body, status=500)):
+        await m.handle_event(_service_event())
+
+    assert ctrl.stamp_and_publish.called
+    d = ctrl.stamp_and_publish.call_args_list[0][0][0].data
+    assert str(d.evidence["http_status"]) == "500"
+    assert "HTTP 500 error page" in d.description
+
+
+async def test_distinct_keys_same_type_do_not_collapse():
+    # Finding dedup is host:title:category — two different AWS keys on one host
+    # must yield two distinct dedup keys, not one.
+    ModuleRegistry.discover()
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["secretfinder"], controller=ctrl)[0]
+
+    body = 'a="AKIAIOSFODNN7EXAMPLE"; b="AKIAJ7Q2MZ4X5KD3PL8W";'
+    with patch("httpx.AsyncClient", return_value=_fake_client(body)):
+        await m.handle_event(_service_event())
+
+    findings = [c[0][0] for c in ctrl.stamp_and_publish.call_args_list
+                if c[0][0].data.evidence["type"] == "AWS Access Key ID"]
+    assert len(findings) == 2
+    keys = {derive_dedup_key(f.type, f.data) for f in findings}
+    assert len(keys) == 2
+    for f in findings:   # the title carries only the redacted form
+        assert "AKIAIOSFODNN7EXAMPLE" not in f.data.title
+        assert "AKIAJ7Q2MZ4X5KD3PL8W" not in f.data.title

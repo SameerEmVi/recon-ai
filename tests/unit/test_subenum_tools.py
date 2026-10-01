@@ -146,18 +146,63 @@ def test_classify_takeover():
     assert classify_takeover("real.example.com") is None
 
 
-async def test_takeover_emits_on_dangling_cname():
+def _cname_event(host, value):
+    ev = MagicMock(); ev.type = EventType.DNS_RECORD
+    ev.data = DnsRecordData(hostname=host, record_type="CNAME", value=value)
+    ev.id = uuid.uuid4(); ev.distance = 1
+    return ev
+
+
+async def test_takeover_confirmed_high_on_unclaimed_fingerprint():
+    from unittest.mock import AsyncMock
     ctrl = _ctrl()
     m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
-    ev = MagicMock(); ev.type = EventType.DNS_RECORD
-    ev.data = DnsRecordData(hostname="blog.example.com", record_type="CNAME",
-                            value="ghost.herokuapp.com")
-    ev.id = uuid.uuid4(); ev.distance = 1
-    await m.handle_event(ev)
+    # Host returns Heroku's unclaimed page → confirmed HIGH.
+    m._fetch_body = AsyncMock(return_value=(404, "No such app\nherokucdn.com/error-pages/no-such-app.html"))
+    await m.handle_event(_cname_event("blog.example.com", "ghost.herokuapp.com"))
     finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
     assert len(finds) == 1
     assert finds[0].category == "subdomain-takeover"
     assert finds[0].evidence["service"] == "Heroku"
+    assert finds[0].severity_hint == "high"
+    assert "unverified" not in finds[0].title
+
+
+async def test_takeover_live_claimed_resource_is_not_flagged():
+    # The CloudFront/S3 false-positive: a live, claimed resource behind a known
+    # service (S3 has a fingerprint, but the body doesn't match it) → NO finding.
+    from unittest.mock import AsyncMock
+    ctrl = _ctrl()
+    m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
+    m._fetch_body = AsyncMock(return_value=(403, "<Error><Code>AccessDenied</Code></Error>"))
+    await m.handle_event(_cname_event("files.example.com", "bucket.s3.amazonaws.com"))
+    assert _emitted(ctrl, EventType.FINDING_CANDIDATE) == []
+
+
+async def test_takeover_no_fingerprint_service_is_low_unverified():
+    # CloudFront has no reliable body fingerprint → LOW unverified, not HIGH.
+    from unittest.mock import AsyncMock
+    ctrl = _ctrl()
+    m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
+    m._fetch_body = AsyncMock(return_value=(403, "anything"))
+    await m.handle_event(_cname_event("assets.example.com", "d123.cloudfront.net"))
+    finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
+    assert len(finds) == 1
+    assert finds[0].severity_hint == "low"
+    assert "unverified" in finds[0].title
+    assert finds[0].evidence["service"] == "AWS CloudFront"
+
+
+async def test_takeover_unreachable_host_is_low_unverified():
+    from unittest.mock import AsyncMock
+    ctrl = _ctrl()
+    m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
+    m._fetch_body = AsyncMock(return_value=(None, None))
+    await m.handle_event(_cname_event("blog.example.com", "ghost.herokuapp.com"))
+    finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
+    assert len(finds) == 1
+    assert finds[0].severity_hint == "low"
+    assert "unverified" in finds[0].title
 
 
 async def test_takeover_ignores_non_cname_and_unknown():

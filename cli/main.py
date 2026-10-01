@@ -134,6 +134,27 @@ def scan(
         False, "--full",
         help="Enable ALL modules: default + passive + web + crawl + discovery.",
     ),
+    # ── related (sibling) root domains ────────────────────────────────────────
+    related: bool = typer.Option(
+        False, "--related",
+        help="Also discover sibling ROOT domains owned by the same org (e.g. "
+             "brand.com, brandliving.nz). Reported for review, never scanned.",
+    ),
+    related_http: bool = typer.Option(
+        False, "--related-http",
+        help="Confirm related domains by one GET / each and check it redirects to "
+             "the target. Contacts hosts OUTSIDE scope — only if your program allows. "
+             "Implies --related.",
+    ),
+    brand: list[str] = typer.Option(
+        [], "--brand",
+        help="Extra brand stem for related-domain guessing (repeatable), e.g. --brand oceania.",
+    ),
+    org: str | None = typer.Option(
+        None, "--org",
+        help="Registrant organisation for reverse-WHOIS related-domain lookup "
+             "(needs WHOISXML_API_KEY; not useful for .nz, whose WHOIS hides registrants).",
+    ),
     # ── AI / agent ────────────────────────────────────────────────────────────
     ai: bool = typer.Option(
         False, "--ai/--no-ai",
@@ -235,7 +256,7 @@ def scan(
         raise typer.Exit(code=1)
 
     # Resolve module selection — profiles take precedence.
-    from modules.registry import FULL_MODULES, PASSIVE_MODULES, SCAN_PROFILES
+    from modules.registry import DEFAULT_MODULES, FULL_MODULES, PASSIVE_MODULES, SCAN_PROFILES
     profile_config: dict = {}
 
     if profile is not None:
@@ -262,6 +283,20 @@ def scan(
         # Default set + optional passive extras.
         enabled_modules = None
         enabled_flags = ["passive"] if passive else None
+
+    # --related adds the module to whatever set was chosen above. With --passive
+    # it is already included (it carries the "passive" flag).
+    related = related or related_http or bool(brand) or bool(org)
+    if related and enabled_flags is None:
+        base = enabled_modules if enabled_modules is not None else DEFAULT_MODULES
+        if "related_domains" not in base:
+            enabled_modules = list(base) + ["related_domains"]
+    rel_cfg = {k: v for k, v in (
+        ("http_check", related_http or None), ("brands", list(brand) or None), ("org", org),
+    ) if v}
+    if rel_cfg:
+        profile_config = {**profile_config,
+                          "related_domains": {**profile_config.get("related_domains", {}), **rel_cfg}}
 
     typer.echo(ui.kv("in-scope", resolved_in))
     typer.echo(ui.kv("out-scope", resolved_out or "(none)"))

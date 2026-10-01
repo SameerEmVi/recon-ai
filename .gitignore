@@ -39,3 +39,6 @@ Thumbs.db
 .idea/
 *.swp
 results/
+
+# Local authorized-target test prompt (not part of the platform)
+Prompt for target.txt
