@@ -140,6 +140,27 @@ class ResultAggregator:
         self._provenance: list[dict] = []
         self._url_src: dict[str, set[str]] = defaultdict(set)   # norm_url -> {tool}
         self._domain_src: dict[str, set[str]] = defaultdict(set)
+        # Optional LLM intelligence, attached before write() by the controller.
+        self._intelligence: dict | None = None
+
+    def new_domains_vs_latest(self, domain: str) -> list[str]:
+        """Subdomains not present in the previous `latest/` scan — the current-vs-
+        historical delta the intelligence layer correlates. [] if no prior scan."""
+        base = os.path.join(self._out_dir, (domain or "unknown").lower().strip("/") or "unknown")
+        prev = os.path.join(base, "latest", "domains.txt")
+        if not os.path.isfile(prev):
+            return []
+        try:
+            old = set(open(prev, encoding="utf-8").read().split())
+        except OSError:
+            return []
+        return sorted(self.domains - old)
+
+    def attach_intelligence(self, intel_lines: list[str], summary_sections: list[str]) -> None:
+        """Attach the LLM correlation report so the single writer emits it as
+        intelligence.txt and appends its sections to summary.txt. No module
+        writes its own files — everything still flows through this writer."""
+        self._intelligence = {"lines": list(intel_lines), "summary_sections": list(summary_sections)}
 
     # ── observation ────────────────────────────────────────────────────────────
 
@@ -252,6 +273,14 @@ class ResultAggregator:
                     if a and " " not in a and 2 <= len(a) <= 64:
                         self.usernames.add(a)
             self._prov(desc[:120], "anomaly", tool, related=d.host, confidence=cat)
+
+        elif etype == "EMAIL":
+            addr = (getattr(d, "address", "") or "").lower().strip()
+            if addr:
+                self.emails.add(addr)
+                self._prov(addr, "email", tool,
+                           related=getattr(d, "found_in", None),
+                           confidence=getattr(d, "source", None))
 
         elif etype == "FINDING_CANDIDATE":
             ev = getattr(d, "evidence", None) or {}
@@ -462,9 +491,10 @@ class ResultAggregator:
             "permutations": "Permutations", "httpx_probe": "HTTP probing",
             "fingerprint": "Technology detection", "whatweb": "Technology detection",
             "katana": "Crawler", "apifinder": "API discovery", "js_intel": "JavaScript analysis",
-            "linkfinder": "JavaScript analysis", "dirsearch": "Content discovery",
+            "linkfinder": "JavaScript analysis",
             "paramfinder": "Parameter discovery", "cloud_intel": "Cloud asset intelligence",
             "censys": "Censys", "metascan": "File/metadata analysis", "secretfinder": "Secret detection",
+            "trufflehog": "Secret detection",
             "naabu": "Port scanning", "nmap": "Service detection", "csprecon": "CSP recon", "seed": "Seed"}
         return sorted({mapping.get(s, s) for s in self.sources})
 
@@ -491,6 +521,8 @@ class ResultAggregator:
         for label, n in counts:
             lines.append(f"{label + ':':<24}{n}")
         lines += ["", "Sources:"] + [f"- {s}" for s in self._source_categories()]
+        if self._intelligence and self._intelligence.get("summary_sections"):
+            lines += list(self._intelligence["summary_sections"])
         return "\n".join(lines) + "\n"
 
     # ── writing ───────────────────────────────────────────────────────────────
@@ -536,6 +568,7 @@ class ResultAggregator:
             "images/ocr.txt": ["# OCR is not implemented in this build; no OCR text extracted."],
             "data-exposure/summary.txt": self._data_exposure_summary(de),
             **{f"data-exposure/{k}": v for k, v in de.items()},
+            **({"intelligence.txt": self._intelligence["lines"]} if self._intelligence else {}),
         }
 
     def write(self, domain: str) -> str:

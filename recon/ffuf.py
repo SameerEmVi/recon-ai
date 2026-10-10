@@ -29,15 +29,56 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import string
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
 _NOT_FOUND_WARNED = False
 
-# Not-found status we always treat as noise unless calibration says the app uses
-# it as its catch-all (in which case it's already covered).
+# Length of the random token used to probe for a site's wildcard/catch-all baseline.
+_RANDOM_TOKEN_LEN = 26
+
+
+def generate_random_string(length: int = _RANDOM_TOKEN_LEN) -> str:
+    """A lowercase-alnum token unlikely to exist as a real path (wildcard probe)."""
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+# Status codes that never indicate a discovered resource, so they must never be
+# emitted as a URL even though `-mc all` surfaces them:
+#   400 — server rejected a malformed path (traversal/encoding payloads like
+#         `/%2e%2e//google.com` or `\..\..\etc\passwd` produce these),
+#   404 — not found,
+#   429 — throttled,
+#   500/502/503/504 — server/transient errors.
+# 401/403/405 are deliberately NOT here: they mean "exists but protected / wrong
+# method", which is interesting for recon (a catch-all 403 is handled separately
+# by calibration's -fc).
+NOISE_STATUS: frozenset[int] = frozenset({400, 404, 429, 500, 502, 503, 504})
+
+# Back-compat alias (was the lone default-noise status).
 _DEFAULT_NOISE_STATUS = 404
+
+
+def is_real_find(status: int, length: int) -> bool:
+    """True only if a ffuf row is a genuinely discovered resource.
+
+    Drops noise statuses (see NOISE_STATUS) and empty-bodied 2xx responses — a
+    `200 len=0` on a CDN/S3 host is a catch-all stub (e.g. CloudFront answering
+    `/soap/servlet/Spy` with an empty 200), not real content, whereas a real file
+    carries a body.
+    """
+    try:
+        st, ln = int(status), int(length)
+    except (TypeError, ValueError):
+        return False
+    if st <= 0 or st in NOISE_STATUS:
+        return False
+    if 200 <= st < 300 and ln == 0:
+        return False
+    return True
 
 
 @dataclass

@@ -53,7 +53,7 @@ def test_registry_discovers_all_expected_modules():
         "subfinder", "dnsx", "naabu", "httpx_probe", "katana", "gowitness",
         "dnsbrute", "permutations",
         # web
-        "gau", "nuclei", "fingerprint", "dirsearch", "linkfinder", "corscanner", "bypass403",
+        "gau", "nuclei", "fingerprint", "ffuf", "linkfinder", "corscanner", "bypass403",
     ]
     for name in expected:
         assert name in names, f"module '{name}' not found in registry"
@@ -650,6 +650,8 @@ async def test_linkfinder_extracts_endpoints_from_js():
     fake_response = MagicMock()
     fake_response.text = fake_js
     fake_response.content = fake_js.encode()
+    fake_response.status_code = 200
+    fake_response.headers = {"content-type": "application/javascript"}
     fake_response.raise_for_status = MagicMock()
 
     fake_client = AsyncMock()

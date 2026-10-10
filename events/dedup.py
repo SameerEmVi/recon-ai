@@ -20,6 +20,7 @@ import urllib.parse
 from events.types import (
     AnomalyData,
     DnsRecordData,
+    EmailData,
     EndpointData,
     EventData,
     EventType,
@@ -80,6 +81,10 @@ def derive_dedup_key(event_type: EventType, data: EventData) -> str:
         case EventType.FINDING_CANDIDATE:
             assert isinstance(data, FindingCandidateData)
             return "finding:" + _short_hash(f"{data.host}:{data.title}:{data.category}")
+
+        case EventType.EMAIL:
+            assert isinstance(data, EmailData)
+            return "email:" + data.address.lower()
 
         case _:
             raise ValueError(f"unknown event type: {event_type!r}")

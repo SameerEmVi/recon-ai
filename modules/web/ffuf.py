@@ -1,8 +1,8 @@
 """
 ffuf — smart directory/content fuzzing via the ffuf binary.
 
-Complements the native `dirsearch` module (which needs no binary) with ffuf's
-speed. The distinguishing feature is **smart calibration**: before fuzzing a
+recon-ai's single content-discovery fuzzer. The distinguishing feature is
+**smart calibration**: before fuzzing a
 service, this module probes a few random, almost-certainly-nonexistent paths
 through the shared rate limiter to learn the site's *catch-all baseline* — the
 classic "the app returns **301** (or 401/403/404) for everything" case — then
@@ -37,11 +37,12 @@ from urllib.parse import urlparse
 from events.types import Event, EventType, UrlData
 from modules.base import BaseModule
 from modules.registry import register
-from recon.dirsearch import generate_random_string
 from recon.ffuf import (
     FfufWrapper,
     build_command,
     derive_calibration,
+    generate_random_string,
+    is_real_find,
     parse_ffuf_json,
 )
 
@@ -215,13 +216,22 @@ class FfufModule(BaseModule):
 
         max_results = int(self.opt("max_results"))
         emitted = 0
+        dropped = 0
         for res in results:
             if emitted >= max_results:
                 break
+            # Final noise gate, independent of the per-host calibration filters:
+            # drop statuses that never indicate a resource (400/404/429/5xx) and
+            # empty-bodied 2xx catch-all stubs. `-mc all` surfaces these and a
+            # mis-learned baseline can let them through, so filter unconditionally.
+            if not is_real_find(res.status, res.length):
+                dropped += 1
+                continue
             if await self.emit(
                 EventType.URL,
                 UrlData(url=res.url, status_code=res.status, found_via="ffuf"),
                 source_event=event,
             ):
                 emitted += 1
-        self._log.info("ffuf: %s → %d finds (%d emitted)", base, len(results), emitted)
+        self._log.info("ffuf: %s → %d finds (%d emitted, %d noise)",
+                       base, len(results), emitted, dropped)

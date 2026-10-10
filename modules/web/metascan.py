@@ -27,7 +27,11 @@ import shutil
 import tempfile
 from urllib.parse import urlparse
 
-from events.types import AnomalyData, Event, EventType, FindingCandidateData
+import re
+
+from events.types import (
+    AnomalyData, EmailData, Event, EventType, FindingCandidateData, TechnologyData,
+)
 from modules.base import BaseModule
 from modules.registry import register
 from recon import metadata, vocabulary
@@ -41,13 +45,64 @@ _EXIFTOOL_MAP = {
     "GPSLongitude": "gps_longitude", "Title": "title", "CreateDate": "created",
 }
 
+# Authoring-software → TECHNOLOGY. Normalized keys, checked in this order. The
+# person-prone `creator` field needs a software hint so we never emit a human
+# name as a technology.
+_TECH_KEYS = ("producer", "creatortool", "software", "application", "creator")
+_SOFTWARE_HINT = re.compile(
+    r"(?i)\b(word|excel|powerpoint|office|acrobat|pdf|indesign|photoshop|"
+    r"illustrator|gimp|libreoffice|openoffice|latex|pages|numbers|keynote|"
+    r"ghostscript|quartz|skia|wkhtmltopdf|itext|reportlab|docx|version|v?\d+\.\d+)\b"
+)
+_VERSION_RE = re.compile(r"^(?P<name>.*?)[\s/v]*(?P<version>\d+(?:\.\d+)+)\s*$")
+
+
+_EMAIL_RE = re.compile(
+    r"\b([A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24})\b"
+)
+
+
+def _emails_in_meta(meta: dict) -> list[str]:
+    """Email addresses embedded in document metadata values (author/creator/…)."""
+    out: list[str] = []
+    for v in meta.values():
+        if not isinstance(v, str):
+            continue
+        for m in _EMAIL_RE.finditer(v):
+            addr = m.group(1).strip().lower()
+            if addr not in out:
+                out.append(addr)
+    return out
+
+
+def _authoring_tech(meta: dict) -> tuple[str, str | None] | None:
+    """Best-effort (name, version) of the authoring software, or None.
+
+    Operates on metascan's already-normalized (lowercase-key) meta dict, so it
+    works identically for the exiftool and pure-Python extraction paths.
+    """
+    for key in _TECH_KEYS:
+        raw = meta.get(key)
+        if not isinstance(raw, str):
+            continue
+        val = raw.strip()
+        if not val:
+            continue
+        if key == "creator" and not _SOFTWARE_HINT.search(val):
+            continue
+        m = _VERSION_RE.match(val)
+        if m and m.group("name").strip():
+            return m.group("name").strip(), m.group("version")
+        return val, None
+    return None
+
 
 @register
 class MetaScanModule(BaseModule):
     name = "metascan"
     description = "Document/image metadata analysis (exiftool if present, else pure-Python EXIF/OOXML/PDF)"
     watched_events = ["URL"]
-    produced_events = ["ANOMALY", "FINDING_CANDIDATE"]
+    produced_events = ["TECHNOLOGY", "ANOMALY", "FINDING_CANDIDATE", "EMAIL"]
     flags = ["active", "web", "metadata"]
     expected_value = 8
     options = {
@@ -94,6 +149,22 @@ class MetaScanModule(BaseModule):
         filename = os.path.basename(urlparse(url).path) or url
         sens = metadata.sensitive(meta)
 
+        # Authoring software → TECHNOLOGY (folded in from the former exifmeta module).
+        tech = _authoring_tech(meta)
+        if tech is not None and host:
+            name, version = tech
+            await self.emit(
+                EventType.TECHNOLOGY,
+                TechnologyData(
+                    host=host,
+                    name=name,
+                    version=version,
+                    category="document",
+                    source="exiftool" if self._exiftool else "heuristic",
+                ),
+                source_event=event,
+            )
+
         # Always record what metadata the file carried.
         compact = "; ".join(f"{k}={v}" for k, v in list(meta.items())[:8])
         if host:
@@ -124,6 +195,16 @@ class MetaScanModule(BaseModule):
                 ),
                 source_event=event,
             )
+
+        # Emails embedded in metadata (author/creator/…) → EMAIL
+        # (scope gate drops out-of-scope domains).
+        if host:
+            for addr in _emails_in_meta(meta):
+                await self.emit(
+                    EventType.EMAIL,
+                    EmailData(address=addr, source="document-metadata", found_in=url),
+                    source_event=event,
+                )
 
         await self._feed_learning(meta)
         self._log.info("metascan: %s → %d metadata field(s)%s",

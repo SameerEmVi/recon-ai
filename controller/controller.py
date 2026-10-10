@@ -69,6 +69,8 @@ class ScanController:
         self._scope = scope
         self._bus = EventBus()
         self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
+        from recon.fetch import ResponseCache
+        self._response_cache = ResponseCache()
         from planner import PlannerConfig, ReconPlanner
         self._planner = ReconPlanner(
             PlannerConfig(mode=plan_mode, max_executions=plan_budget)
@@ -163,12 +165,12 @@ class ScanController:
 
         # headline counts
         order = ["SUBDOMAIN", "DNS_RECORD", "IP", "OPEN_PORT", "HTTP_SERVICE",
-                 "TECHNOLOGY", "URL", "ENDPOINT", "PARAMETER", "ANOMALY",
+                 "TECHNOLOGY", "URL", "ENDPOINT", "PARAMETER", "EMAIL", "ANOMALY",
                  "FINDING_CANDIDATE"]
         fg_of = {
             "SUBDOMAIN": "cyan", "OPEN_PORT": "byellow", "HTTP_SERVICE": "bgreen",
             "TECHNOLOGY": "bmagenta", "URL": "blue", "ENDPOINT": "bcyan",
-            "PARAMETER": "grey", "FINDING_CANDIDATE": "bred",
+            "PARAMETER": "grey", "EMAIL": "bgreen", "FINDING_CANDIDATE": "bred",
         }
         counts = {t: len(s.get(t, [])) for t in order if s.get(t)}
         if counts:
@@ -218,6 +220,13 @@ class ScanController:
         if techs:
             print("\n" + ui.section("Technologies", len(techs)))
             print("  " + ", ".join(ui.paint(t, "bmagenta") for t in techs))
+
+        # emails (in-scope addresses discovered in bodies / document metadata)
+        emails = sorted({_get(d, "address") for d in s.get("EMAIL", [])} - {None})
+        if emails:
+            print("\n" + ui.section("Emails", len(emails)))
+            for addr in emails:
+                print(ui.bullet(addr, "green"))
 
         # findings (the important bit)
         finds = s.get("FINDING_CANDIDATE", [])
@@ -319,6 +328,12 @@ class ScanController:
     def planner(self):
         """Adaptive Reconnaissance Planner deciding which modules run."""
         return self._planner
+
+    @property
+    def response_cache(self):
+        """Shared per-scan HTTP body cache — one GET per URL, fanned out to
+        every body-consuming module (see recon.fetch.ResponseCache)."""
+        return self._response_cache
 
     @property
     def ai_enabled(self) -> bool:
@@ -473,7 +488,7 @@ class ScanController:
             )
 
         # Wait for the reactive cascade (subdomain→resolve→probe→fuzz, incl. slow
-        # modules like ffuf/dirsearch) to go quiescent before teardown. Replaces
+        # modules like ffuf) to go quiescent before teardown. Replaces
         # a fixed 0.2s sleep that cancelled in-flight reactive tasks.
         await self._bus.drain()
 
@@ -484,13 +499,18 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
 
-        # Phase 3: LLM triage.
+        # Phase 3a: LLM correlation & intelligence (works without a DB — operates
+        # on the aggregator's in-memory structured evidence, attached to the writer).
+        if self._ai_enabled and self._anthropic_api_key and self._aggregator is not None:
+            await self._run_intelligence(seed_domain)
+        elif self._ai_enabled and not self._anthropic_api_key:
+            log.warning("--ai set but ANTHROPIC_API_KEY not found — intelligence skipped")
+
+        # Phase 3b: DB-backed LLM triage (host/finding annotation).
         if self._ai_enabled and self._persister and self._anthropic_api_key:
             await self._run_triage(seed_domain)
-        elif self._ai_enabled and not self._anthropic_api_key:
-            log.warning("--ai set but ANTHROPIC_API_KEY not found — triage skipped")
-        elif self._ai_enabled and not self._persister:
-            log.warning("--ai requires --db-url for triage — skipped")
+        elif self._ai_enabled and not self._persister and self._anthropic_api_key:
+            log.info("--ai without --db-url: intelligence ran, DB triage skipped")
 
         # Phase 4: constrained agent loop.
         if self._agent_enabled and self._persister and self._anthropic_api_key:
@@ -499,6 +519,49 @@ class ScanController:
             log.warning("--agent set but ANTHROPIC_API_KEY not found — agent skipped")
         elif self._agent_enabled and not self._persister:
             log.warning("--agent requires --db-url — agent skipped")
+
+    async def _run_intelligence(self, target_domain: str) -> None:
+        """LLM correlation pass over the aggregator's structured evidence.
+        Read-only reasoning: it produces leads and attaches them to the writer,
+        it never takes a recon action or touches scope."""
+        agg = self._aggregator
+        if agg is None:
+            return
+        from ai.correlate import (
+            IntelligenceAnalyst,
+            render_intelligence_txt,
+            render_summary_sections,
+        )
+        try:
+            analyst = IntelligenceAnalyst(
+                api_key=self._anthropic_api_key,  # type: ignore[arg-type]
+                model=self._ai_model,
+            )
+            diff_new = agg.new_domains_vs_latest(target_domain)
+            report = await analyst.analyze(agg, target=target_domain, diff_new=diff_new)
+        except Exception as exc:
+            log.error("intelligence pass failed: %s", exc)
+            return
+
+        if report.is_empty:
+            log.info("intelligence: no verifiable leads produced")
+            return
+
+        agg.attach_intelligence(
+            render_intelligence_txt(report), render_summary_sections(report)
+        )
+        try:
+            from cli import ui
+            print(ui.paint("\n  LLM INTELLIGENCE", "bcyan", bold=True))
+            for f in report.findings[:8]:
+                print(f"  [{f.interest}] {f.title}  ({f.status}/{f.confidence})")
+            if report.recommended_next:
+                print(ui.info("next recon → " + ", ".join(
+                    n.module for n in report.recommended_next[:5])))
+            if report.dropped:
+                print(ui.info(f"{report.dropped} unverifiable model claim(s) discarded"))
+        except Exception:
+            pass
 
     async def _run_triage(self, target_domain: str) -> None:
         from ai.triage import Triage
@@ -557,7 +620,13 @@ class ScanController:
         if hasattr(d, "hostname"):
             return d.hostname
         if hasattr(d, "address"):
-            return d.address
+            addr = d.address
+            # EmailData.address is user@domain → scope it by its domain so the
+            # gate drops out-of-scope (third-party) addresses. IpData.address
+            # (never contains '@') is returned as-is.
+            if isinstance(addr, str) and "@" in addr:
+                return addr.rsplit("@", 1)[-1]
+            return addr
         if hasattr(d, "host"):
             return d.host
         if hasattr(d, "url"):

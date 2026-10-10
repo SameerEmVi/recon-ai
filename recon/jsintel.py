@@ -59,6 +59,7 @@ class JsAnalysis:
     services: list[str] = field(default_factory=list)
     identifiers: list[str] = field(default_factory=list)
     graphql: list[str] = field(default_factory=list)
+    emails: list[str] = field(default_factory=list)              # discovered emails
 
     def add(self, bucket: str, value, *, dedup: set | None = None) -> None:
         seq = getattr(self, bucket)
@@ -197,6 +198,36 @@ class WebSocketExtractor(Extractor):
                     analysis.add("websockets", u.replace("https://", "wss://").replace("http://", "ws://"))
 
 
+class EmailExtractor(Extractor):
+    """Extract email addresses from HTML/JS bodies (mailto: links + inline text).
+
+    Runs over content jsintel already fetched — no extra network. Addresses are
+    lowercased and de-duplicated here; scope restriction to in-scope domains is
+    enforced downstream by the scope gate (an email is scoped by its domain), so
+    this stays a pure extractor. Obvious non-addresses (sentry/example keys,
+    versioned filenames like foo@2x.png) are filtered.
+    """
+    name = "emails"
+    _MAILTO = re.compile(r"mailto:([^\"'`?\s>]{3,254})", re.I)
+    _INLINE = re.compile(
+        r"\b([A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24})\b"
+    )
+    # Reject things that match the shape but aren't contactable addresses.
+    _REJECT = re.compile(
+        r"(@\d+x\.|@sentry|sentry\.io/|@[0-9.]+$|\.(png|jpe?g|gif|svg|webp|"
+        r"css|js|woff2?|ttf|map)$)",
+        re.I,
+    )
+
+    def extract(self, content, base_url, analysis):
+        for rx in (self._MAILTO, self._INLINE):
+            for m in rx.finditer(content):
+                addr = m.group(1).strip().lower()
+                if "@" not in addr or self._REJECT.search(addr):
+                    continue
+                analysis.add("emails", addr)
+
+
 class SourceMapExtractor(Extractor):
     name = "source_maps"
     _DIRECTIVE = re.compile(r"//[#@]\s*sourceMappingURL=([^\s'\"]+)")
@@ -302,6 +333,7 @@ DEFAULT_EXTRACTORS: list[Extractor] = [
     UrlExtractor(),
     ApiPathExtractor(),
     WebSocketExtractor(),
+    EmailExtractor(),
     SourceMapExtractor(),
     ConfigIndicatorExtractor(),
     RouteExtractor(),
