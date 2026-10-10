@@ -28,18 +28,46 @@ def test_waf_detect_none_on_clean_response():
     assert detect(status=200, headers={"server": "nginx"}) is None
 
 
-def test_waf_detect_cloudflare_header_presence_not_blocking():
-    sig = detect(status=200, headers={"Server": "cloudflare", "CF-RAY": "abc"})
+def test_cdn_presence_alone_is_not_a_signal():
+    # A pure CDN/LB fingerprint (no block page / 429 / WAF product) is NOT a WAF
+    # signal — a CDN is not a firewall. Covers the 200 case for several CDNs.
+    assert detect(status=200, headers={"Server": "cloudflare", "CF-RAY": "abc"}) is None
+    assert detect(status=200, headers={"x-amz-cf-id": "deadbeef"}) is None
+    assert detect(status=200, headers={"server": "AkamaiGHost"}) is None
+
+
+def test_waf_product_presence_not_blocking():
+    # A dedicated WAF product on a 200 is presence only (mild), not blocking.
+    sig = detect(status=200, headers={"x-iinfo": "1"})
     assert sig is not None
-    assert sig.vendor == "Cloudflare"
+    assert sig.vendor == "Imperva Incapsula"
     assert sig.blocking is False
 
 
-def test_waf_detect_blocking_status():
-    sig = detect(status=403, headers={"Server": "cloudflare"})
+def test_waf_product_blocking_status():
+    sig = detect(status=403, headers={"x-iinfo": "1"})
     assert sig is not None
     assert sig.blocking is True
     assert sig.status == 403
+
+
+def test_cloudfront_403_during_fuzzing_is_not_a_block():
+    # REGRESSION: an S3/CloudFront 403 for a non-existent path (what ffuf /
+    # bypass403 generate by the hundred) must NOT be read as a WAF block,
+    # or the global backoff ramps to x32 and starves the whole scan.
+    assert detect(status=403, headers={"x-amz-cf-id": "abc", "server": "AmazonS3"}) is None
+    assert detect(status=404, headers={"x-amz-cf-id": "abc"}) is None
+
+
+def test_cloudfront_real_block_still_detected():
+    # A genuine block behind CloudFront still fires: a WAF-product header...
+    assert detect(status=403, headers={"x-amz-cf-id": "abc",
+                                       "x-amzn-waf-action": "block"}).blocking is True
+    # ...a block-page body...
+    assert detect(status=403, headers={"x-amz-cf-id": "abc"},
+                  body="This request has been blocked").blocking is True
+    # ...or an explicit 429.
+    assert detect(status=429, headers={"x-amz-cf-id": "abc"}).blocking is True
 
 
 def test_waf_detect_block_page_body():
@@ -117,11 +145,11 @@ def test_penalty_grows_on_block_and_recovers():
 def test_backoff_self_imposes_baseline_without_static_limit():
     lim = RateLimiter()  # no static rate
     assert lim._base_interval == 0.0
-    lim.observe_http(status=403, headers={"server": "cloudflare"})
+    lim.observe_http(status=403, headers={"x-iinfo": "1"})  # Imperva WAF block
     # a WAF block now creates a real interval so guard() actually slows down
     assert lim._base_interval > 0.0
     assert lim.penalty > 1.0
-    assert "Cloudflare" in lim.waf_vendors
+    assert "Imperva Incapsula" in lim.waf_vendors
 
 
 # ── get_limiter test-safety ───────────────────────────────────────────────────
@@ -170,10 +198,12 @@ def test_bare_429_is_a_ratelimit_signal():
     assert "429" in sig.vendor
 
 
-def test_vendor_503_is_still_a_waf_block():
-    # A Cloudflare 503 IS a WAF block (vendor fingerprint present).
-    sig = detect(status=503, headers={"server": "cloudflare", "cf-ray": "x"})
-    assert sig is not None and sig.vendor == "Cloudflare" and sig.blocking is True
+def test_cdn_503_not_block_but_waf_product_503_is():
+    # A CDN 503 is a transient/origin error, NOT a firewall block.
+    assert detect(status=503, headers={"server": "cloudflare", "cf-ray": "x"}) is None
+    # But a 503 from a dedicated WAF product IS a block.
+    sig = detect(status=503, headers={"x-iinfo": "1"})
+    assert sig is not None and sig.vendor == "Imperva Incapsula" and sig.blocking is True
 
 
 async def test_bare_503_does_not_back_off_limiter():

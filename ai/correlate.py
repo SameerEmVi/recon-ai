@@ -36,7 +36,7 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # Kept as a curated set of real module names; verified against the registry when
 # available so a recommendation can never name a non-existent capability.
 _ANALYSIS_MODULES = [
-    "js_intel", "apifinder", "linkfinder", "paramfinder", "dirsearch", "ffuf",
+    "js_intel", "apifinder", "linkfinder", "paramfinder", "ffuf",
     "secretfinder", "trufflehog", "metascan", "nuclei", "katana", "fingerprint", "whatweb",
     "wayback", "cloud_intel", "takeover", "corscanner", "bypass403",
 ]

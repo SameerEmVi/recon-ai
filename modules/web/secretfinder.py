@@ -70,24 +70,13 @@ class SecretFinderModule(BaseModule):
         that dumps env/config is one of the likeliest places a secret leaks.
         None only on transport failure / oversize body.
         """
-        try:
-            import httpx
-        except ImportError:
-            self._log.warning("httpx not installed")
+        # Shared per-scan cache: one GET per URL across all body-consumers.
+        res = await self.fetch(
+            url, timeout=self.opt("timeout"), max_body_kb=self.opt("max_body_kb")
+        )
+        if not res.ok or res.text is None:
             return None
-
-        try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
-                async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                    r = await client.get(url, follow_redirects=True)
-                self.inspect_response(r)
-                if len(r.content) / 1024 > self.opt("max_body_kb"):
-                    self._log.debug("%s: %s too large — skipping", self.name, url)
-                    return None
-                return r.text, r.status_code
-        except Exception as exc:
-            self._log.debug("%s: fetch failed for %s: %s", self.name, url, exc)
-            return None
+        return res.text, res.status_code
 
     async def handle_event(self, event: Event) -> None:
         url = self._target_url(event)

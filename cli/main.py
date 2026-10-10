@@ -564,7 +564,7 @@ def wordlist_export(
 ) -> None:
     """Generate a ranked wordlist for one category+scope (broadest/most-confident first).
 
-    The output file can be fed straight to content discovery, e.g. the dirsearch
+    The output file can be fed straight to content discovery, e.g. the ffuf
     module's wordlist=<path> option. Learned words are candidates for probing,
     never assertions that any of them exist.
     """

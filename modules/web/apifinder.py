@@ -406,49 +406,24 @@ class ApiFinderModule(BaseModule):
             await self._process_text(text, url, event)
 
     async def _probe(self, url: str) -> tuple[int | None, str | None]:
-        """GET `url` through the shared limiter; return (status_code, body|None).
+        """GET `url` via the shared per-scan cache; return (status_code, body|None).
 
         Body is returned only for a size-capped 2xx response. Returns
         (None, None) on any transport failure. Never raises.
         """
-        try:
-            import httpx
-        except ImportError:
-            self._log.warning("httpx not installed")
+        res = await self.fetch(
+            url, timeout=self.opt("timeout"), max_body_kb=self.opt("max_body_kb")
+        )
+        if not res.ok:
             return None, None
-        try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
-                async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                    r = await client.get(url, follow_redirects=True)
-                self.inspect_response(r)
-                text = None
-                if 200 <= r.status_code < 300 and len(r.content) / 1024 <= self.opt("max_body_kb"):
-                    text = r.text
-                return r.status_code, text
-        except Exception as exc:
-            self._log.debug("apifinder: probe failed for %s: %s", url, exc)
-            return None, None
+        return res.status_code, (res.text if res.is_2xx else None)
 
     async def _fetch(self, url: str) -> str | None:
-        """Fetch a body through the shared rate limiter / WAF backoff."""
-        try:
-            import httpx
-        except ImportError:
-            self._log.warning("httpx not installed")
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
-                async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                    r = await client.get(url, follow_redirects=True)
-                self.inspect_response(r)
-                r.raise_for_status()
-                if len(r.content) / 1024 > self.opt("max_body_kb"):
-                    self._log.debug("apifinder: %s too large — skipping", url)
-                    return None
-                return r.text
-        except Exception as exc:
-            self._log.debug("apifinder: fetch failed for %s: %s", url, exc)
-            return None
+        """Fetch a body via the shared per-scan cache (one GET per URL)."""
+        res = await self.fetch(
+            url, timeout=self.opt("timeout"), max_body_kb=self.opt("max_body_kb")
+        )
+        return res.text if res.is_2xx else None
 
     async def _process_text(self, text: str, base_url: str, event: Event) -> None:
         """Extract references from a body and emit them. No network I/O."""

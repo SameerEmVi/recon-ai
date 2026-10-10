@@ -69,6 +69,8 @@ class ScanController:
         self._scope = scope
         self._bus = EventBus()
         self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
+        from recon.fetch import ResponseCache
+        self._response_cache = ResponseCache()
         from planner import PlannerConfig, ReconPlanner
         self._planner = ReconPlanner(
             PlannerConfig(mode=plan_mode, max_executions=plan_budget)
@@ -163,12 +165,12 @@ class ScanController:
 
         # headline counts
         order = ["SUBDOMAIN", "DNS_RECORD", "IP", "OPEN_PORT", "HTTP_SERVICE",
-                 "TECHNOLOGY", "URL", "ENDPOINT", "PARAMETER", "ANOMALY",
+                 "TECHNOLOGY", "URL", "ENDPOINT", "PARAMETER", "EMAIL", "ANOMALY",
                  "FINDING_CANDIDATE"]
         fg_of = {
             "SUBDOMAIN": "cyan", "OPEN_PORT": "byellow", "HTTP_SERVICE": "bgreen",
             "TECHNOLOGY": "bmagenta", "URL": "blue", "ENDPOINT": "bcyan",
-            "PARAMETER": "grey", "FINDING_CANDIDATE": "bred",
+            "PARAMETER": "grey", "EMAIL": "bgreen", "FINDING_CANDIDATE": "bred",
         }
         counts = {t: len(s.get(t, [])) for t in order if s.get(t)}
         if counts:
@@ -218,6 +220,13 @@ class ScanController:
         if techs:
             print("\n" + ui.section("Technologies", len(techs)))
             print("  " + ", ".join(ui.paint(t, "bmagenta") for t in techs))
+
+        # emails (in-scope addresses discovered in bodies / document metadata)
+        emails = sorted({_get(d, "address") for d in s.get("EMAIL", [])} - {None})
+        if emails:
+            print("\n" + ui.section("Emails", len(emails)))
+            for addr in emails:
+                print(ui.bullet(addr, "green"))
 
         # findings (the important bit)
         finds = s.get("FINDING_CANDIDATE", [])
@@ -319,6 +328,12 @@ class ScanController:
     def planner(self):
         """Adaptive Reconnaissance Planner deciding which modules run."""
         return self._planner
+
+    @property
+    def response_cache(self):
+        """Shared per-scan HTTP body cache — one GET per URL, fanned out to
+        every body-consuming module (see recon.fetch.ResponseCache)."""
+        return self._response_cache
 
     @property
     def ai_enabled(self) -> bool:
@@ -473,7 +488,7 @@ class ScanController:
             )
 
         # Wait for the reactive cascade (subdomain→resolve→probe→fuzz, incl. slow
-        # modules like ffuf/dirsearch) to go quiescent before teardown. Replaces
+        # modules like ffuf) to go quiescent before teardown. Replaces
         # a fixed 0.2s sleep that cancelled in-flight reactive tasks.
         await self._bus.drain()
 
@@ -605,7 +620,13 @@ class ScanController:
         if hasattr(d, "hostname"):
             return d.hostname
         if hasattr(d, "address"):
-            return d.address
+            addr = d.address
+            # EmailData.address is user@domain → scope it by its domain so the
+            # gate drops out-of-scope (third-party) addresses. IpData.address
+            # (never contains '@') is returned as-is.
+            if isinstance(addr, str) and "@" in addr:
+                return addr.rsplit("@", 1)[-1]
+            return addr
         if hasattr(d, "host"):
             return d.host
         if hasattr(d, "url"):

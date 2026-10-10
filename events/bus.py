@@ -71,7 +71,7 @@ class EventBus:
         Handlers are spawned as tasks and may themselves publish events (which
         spawn further tasks). We repeatedly await the pending set until it stays
         empty across a short settle window — so a slow reactive module (e.g.
-        ffuf/dirsearch) or a deep subdomain→resolve→probe→fuzz chain finishes
+        ffuf) or a deep subdomain→resolve→probe→fuzz chain finishes
         before the scan tears down, instead of being cancelled by teardown.
 
         Termination is guaranteed by the existing bounds: dedup drops repeated

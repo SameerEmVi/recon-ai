@@ -29,6 +29,7 @@ from urllib.parse import urlparse, urlunparse
 
 from events.types import (
     AnomalyData,
+    EmailData,
     EndpointData,
     Event,
     EventType,
@@ -63,7 +64,7 @@ class JsIntelModule(BaseModule):
     name = "js_intel"
     description = "JavaScript Intelligence Engine: endpoints, APIs, source maps, websockets, config & tech from JS/HTML"
     watched_events = ["HTTP_SERVICE", "URL"]
-    produced_events = ["URL", "ENDPOINT", "PARAMETER", "TECHNOLOGY", "ANOMALY"]
+    produced_events = ["URL", "ENDPOINT", "PARAMETER", "TECHNOLOGY", "ANOMALY", "EMAIL"]
     flags = ["active", "web", "js-analysis", "api-discovery"]
     # Planner metadata: medium cost, high value (rich structured surface).
     expected_value = 8
@@ -138,24 +139,11 @@ class JsIntelModule(BaseModule):
         await self._emit_analysis(analysis, event)
 
     async def _fetch(self, url: str) -> str | None:
-        try:
-            import httpx
-        except ImportError:
-            self._log.warning("httpx not installed")
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
-                async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                    r = await client.get(url, follow_redirects=True)
-                self.inspect_response(r)
-                r.raise_for_status()
-                if len(r.content) / 1024 > self.opt("max_body_kb"):
-                    self._log.debug("js_intel: %s too large — skipping", url)
-                    return None
-                return r.text
-        except Exception as exc:
-            self._log.debug("js_intel: fetch failed for %s: %s", url, exc)
-            return None
+        # Shared per-scan cache: one GET per URL across all body-consumers.
+        res = await self.fetch(
+            url, timeout=self.opt("timeout"), max_body_kb=self.opt("max_body_kb")
+        )
+        return res.text if res.is_2xx else None
 
     # ── emission (single chokepoint: self.emit → scope gate) ───────────────────
 
@@ -215,6 +203,12 @@ class JsIntelModule(BaseModule):
                 self._tech_seen.add((host, tech))
                 await self.emit(EventType.TECHNOLOGY, TechnologyData(host=host,
                                 name=tech, source="js_intel"), source_event=event)
+
+        # Email addresses → EMAIL (scope gate drops out-of-scope domains)
+        for addr in a.emails:
+            await self.emit(EventType.EMAIL, EmailData(address=addr,
+                            source="web-body", found_in=a.source_url),
+                            source_event=event)
 
         self._log.info(
             "js_intel: %s → urls=%d endpoints=%d ws=%d maps=%d config=%d tech=%d routes=%d services=%d",

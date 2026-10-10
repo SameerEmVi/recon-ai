@@ -181,6 +181,80 @@ class BaseModule(ABC):
             )
         return sig
 
+    async def fetch(
+        self,
+        url: str,
+        *,
+        timeout: int = 20,
+        max_body_kb: int = 1024,
+        follow_redirects: bool = True,
+    ) -> "FetchResult":
+        """GET `url` once per scan and share the result with every module.
+
+        Centralizes the fetch pattern that every body-consuming web module used
+        to repeat (own httpx client + guard() + inspect_response() + r.text).
+        The scan's shared ResponseCache de-dups by URL: concurrent callers for
+        the same URL trigger ONE real network op (one rate-limit slot, one WAF
+        observation); later callers get the cached FetchResult.
+
+        Never raises — a transport failure returns FetchResult(ok=False, error=…).
+        `text` is populated for any response within the size cap regardless of
+        status (secretfinder deliberately scans 4xx/5xx bodies — stack traces
+        leak), and is None only for an oversized or failed body; status/headers
+        are still populated on any real response so probing callers can reason
+        about it.
+        """
+        from dataclasses import replace
+        from recon.fetch import (
+            CACHE_MAX_BODY_KB,
+            FetchResult,
+            ResponseCache,
+            get_response_cache,
+        )
+        from urllib.parse import urlparse
+
+        async def _do_fetch() -> "FetchResult":
+            try:
+                import httpx
+            except ImportError:
+                self._log.warning("httpx not installed")
+                return FetchResult(url=url, ok=False, error="httpx not installed")
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with self.guard(f"http:{urlparse(url).hostname or url}"):
+                        r = await client.get(url, follow_redirects=follow_redirects)
+                    self.inspect_response(r)
+                    ctype = r.headers.get("content-type")
+                    size_kb = len(r.content) / 1024
+                    # Store the FULL body (up to the global ceiling); per-caller
+                    # max_body_kb is applied below so the first fetcher's cap does
+                    # not starve a later caller with a larger one.
+                    text = r.text if size_kb <= CACHE_MAX_BODY_KB else None
+                    return FetchResult(
+                        url=url,
+                        status_code=r.status_code,
+                        text=text,
+                        headers=dict(r.headers),
+                        content_type=ctype,
+                        ok=True,
+                        size_kb=size_kb,
+                    )
+            except Exception as exc:
+                self._log.debug("fetch failed for %s: %s", url, exc)
+                return FetchResult(url=url, ok=False, error=str(exc))
+
+        def _apply_cap(res: "FetchResult") -> "FetchResult":
+            # Hide the body from THIS caller if it exceeds the caller's cap; the
+            # shared cache keeps the full body for callers with a larger cap.
+            if res.text is not None and res.size_kb is not None and res.size_kb > max_body_kb:
+                return replace(res, text=None)
+            return res
+
+        cache = get_response_cache(self._ctrl)
+        if cache is None:  # mock controller / cache disabled → direct, uncached
+            return _apply_cap(await _do_fetch())
+        return _apply_cap(await cache.get_or_fetch(ResponseCache.key(url), _do_fetch))
+
     async def run_proc(
         self, cmd: list[str], *, timeout: int = 60, bucket: str | None = None,
         input_text: str | None = None,

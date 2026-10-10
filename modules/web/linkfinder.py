@@ -86,29 +86,15 @@ class LinkFinderModule(BaseModule):
         if not _is_js_url(url, content_type):
             return
 
-        try:
-            import httpx
-        except ImportError:
-            self._log.warning("httpx not installed")
-            return
-
         self._log.debug("linkfinder: fetching %s", url)
 
-        try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
-                async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                    r = await client.get(url, follow_redirects=True)
-                self.inspect_response(r)
-                r.raise_for_status()
-                # Reject oversized responses.
-                size_kb = len(r.content) / 1024
-                if size_kb > self.opt("max_js_size_kb"):
-                    self._log.debug("linkfinder: %s too large (%.0fKB) — skipping", url, size_kb)
-                    return
-                js_content = r.text
-        except Exception as exc:
-            self._log.debug("linkfinder: fetch failed for %s: %s", url, exc)
+        # Shared per-scan cache: one GET per URL across all body-consumers.
+        res = await self.fetch(
+            url, timeout=self.opt("timeout"), max_body_kb=self.opt("max_js_size_kb")
+        )
+        if not res.is_2xx or res.text is None:
             return
+        js_content = res.text
 
         base_url = url
         parsed_base = urlparse(url)

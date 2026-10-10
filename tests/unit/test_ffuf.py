@@ -119,6 +119,35 @@ def test_parse_ffuf_json_tolerates_garbage():
     assert parse_ffuf_json(json.dumps({"no_results": 1})) == []
 
 
+# ── is_real_find: the unconditional noise gate ────────────────────────────────
+
+def test_is_real_find_drops_noise_statuses():
+    from recon.ffuf import is_real_find
+    for st in (400, 404, 429, 500, 502, 503, 504):
+        assert is_real_find(st, 1234) is False
+    # genuine finds and "exists but protected / wrong method" are kept
+    assert is_real_find(200, 1234) is True
+    assert is_real_find(301, 162) is True
+    assert is_real_find(401, 10) is True
+    assert is_real_find(403, 10) is True
+    assert is_real_find(405, 10) is True
+
+
+def test_is_real_find_drops_empty_2xx_stub():
+    from recon.ffuf import is_real_find
+    # a 200 with no body is a CDN/S3 catch-all stub, not real content
+    assert is_real_find(200, 0) is False
+    assert is_real_find(204, 0) is False
+    assert is_real_find(200, 1) is True
+
+
+def test_is_real_find_tolerates_bad_input():
+    from recon.ffuf import is_real_find
+    assert is_real_find(None, 10) is False      # type: ignore[arg-type]
+    assert is_real_find("x", 10) is False       # type: ignore[arg-type]
+    assert is_real_find(0, 10) is False
+
+
 # ── module: registered, reactive, drives ffuf and emits URLs ──────────────────
 
 def _mock_controller():
@@ -185,3 +214,55 @@ async def test_ffuf_module_calibrates_and_emits(tmp_path):
     calls = [c[0][0] for c in ctrl.stamp_and_publish.call_args_list]
     urls = {e.data.url for e in calls if hasattr(e.data, "url")}
     assert "https://svc.x.com/admin" in urls
+
+
+async def test_ffuf_module_drops_noise_rows(tmp_path):
+    # A 404 and an empty-bodied 200 that slip past calibration must NOT be
+    # emitted as URLs — is_real_find is the final gate.
+    from events.types import EventType, HttpServiceData
+    from modules.registry import ModuleRegistry
+
+    ctrl = _mock_controller()
+    m = ModuleRegistry.load(names=["ffuf"], controller=ctrl)[0]
+    m._config["wordlist"] = str(tmp_path / "wl.txt")
+    (tmp_path / "wl.txt").write_text("admin\n")
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = b"x" * 100
+    resp.headers = {}
+    fake_client = AsyncMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.get = AsyncMock(return_value=resp)
+
+    ffuf_json = json.dumps({"results": [
+        {"input": {"FUZZ": "admin"}, "status": 200, "length": 999,
+         "url": "https://svc.x.com/admin"},
+        {"input": {"FUZZ": "missing"}, "status": 404, "length": 44,
+         "url": "https://svc.x.com/missing"},
+        {"input": {"FUZZ": "stub"}, "status": 200, "length": 0,
+         "url": "https://svc.x.com/stub"},
+    ]})
+
+    async def fake_run(self, cmd, *, bucket="ffuf"):
+        out = cmd[cmd.index("-o") + 1]
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(ffuf_json)
+        return True
+
+    event = MagicMock()
+    event.type = EventType.HTTP_SERVICE
+    event.data = HttpServiceData(url="https://svc.x.com/", status_code=200)
+    event.id = uuid.uuid4()
+    event.distance = 1
+
+    with patch("httpx.AsyncClient", return_value=fake_client), \
+         patch("recon.ffuf.FfufWrapper.run", new=fake_run):
+        await m.handle_event(event)
+
+    urls = {c[0][0].data.url for c in ctrl.stamp_and_publish.call_args_list
+            if hasattr(c[0][0].data, "url")}
+    assert "https://svc.x.com/admin" in urls
+    assert "https://svc.x.com/missing" not in urls   # 404 dropped
+    assert "https://svc.x.com/stub" not in urls       # empty 2xx stub dropped

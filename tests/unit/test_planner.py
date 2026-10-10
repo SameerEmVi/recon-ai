@@ -126,7 +126,7 @@ def test_tech_event_itself_triggers_match():
 
 def test_passive_first_defers_active_modules():
     p = ReconPlanner(PlannerConfig(mode=MODE_PASSIVE_FIRST))
-    active = mod("dirsearch", flags=["active", "slow", "web"])
+    active = mod("ffuf", flags=["active", "slow", "web"])
     passive = mod("wayback", flags=["passive"])
     assert p.evaluate(active, http_event("https://x.com/")).run is False
     assert p.evaluate(passive, url_event("https://x.com/a")).run is True
@@ -140,13 +140,13 @@ def test_passive_first_skips_active_seed():
 
 def test_default_mode_runs_active():
     p = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
-    assert p.evaluate(mod("dirsearch", flags=["active", "web"]), http_event("https://x.com/")).run is True
+    assert p.evaluate(mod("ffuf", flags=["active", "web"]), http_event("https://x.com/")).run is True
 
 
 def test_aggressive_allows_more_runs_per_host():
     agg = ReconPlanner(PlannerConfig(mode=MODE_AGGRESSIVE))
     dflt = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
-    m = mod("dirsearch", flags=["active"])
+    m = mod("ffuf", flags=["active"])
     # run the same module on the same host many times; aggressive tolerates more
     agg_runs = sum(agg.evaluate(m, http_event("https://x.com/")).run for _ in range(120))
     dflt_runs = sum(dflt.evaluate(m, http_event("https://x.com/")).run for _ in range(120))
@@ -157,7 +157,7 @@ def test_aggressive_allows_more_runs_per_host():
 
 def test_execution_budget_exhausts():
     p = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT, max_executions=3))
-    m = mod("dirsearch", flags=["active"])
+    m = mod("ffuf", flags=["active"])
     runs = [p.evaluate(m, http_event(f"https://h{i}.x.com/")).run for i in range(6)]
     assert sum(runs) == 3
     assert runs[:3] == [True, True, True]
@@ -187,7 +187,7 @@ def test_prerequisite_gate():
 def test_explain_reports_selection_and_skips():
     p = ReconPlanner(PlannerConfig(mode=MODE_PASSIVE_FIRST))
     p.evaluate(mod("wayback", flags=["passive"]), url_event("https://x.com/a"))
-    p.evaluate(mod("dirsearch", flags=["active"]), http_event("https://x.com/"))
+    p.evaluate(mod("ffuf", flags=["active"]), http_event("https://x.com/"))
     text = p.explain()
     assert "wayback" in text
     assert "passive-first" in text
@@ -210,7 +210,7 @@ def test_planner_does_not_mutate_event_scope():
     ev = http_event("https://x.com/")
     before = ev.scope_status
     p.observe(ev)
-    p.evaluate(mod("dirsearch", flags=["active"]), ev)
+    p.evaluate(mod("ffuf", flags=["active"]), ev)
     assert ev.scope_status == before          # planner never re-decides scope
 
 

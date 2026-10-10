@@ -76,8 +76,12 @@ pip install -e ".[sqlite,ai,mcp,dev]"
 
 External binaries are optional per module (modules warn-and-skip if a binary is
 missing). Commonly used: subfinder, dnsx, httpx (ProjectDiscovery), naabu,
-katana, nuclei. Directory/content discovery is native (the **dirsearch** module,
-no binary required).
+katana, nuclei, ffuf. Directory/content discovery uses the **ffuf** binary
+(the `ffuf` module), which is required for content discovery. The pure-Python
+**extfuzz** module complements it (no binary): it fuzzes file extensions on
+already-discovered paths (`app.js` → `app.js.map`/`.bak`, `download.php` →
+`download.bak`) to surface source maps, backups, configs and dumps that a
+word-based fuzzer can't reach.
 
 **See [INSTALL.md](INSTALL.md) for the full installation guide** — prerequisites,
 Go/recon-binary setup, the Windows `httpx` PATH gotcha, database and AI

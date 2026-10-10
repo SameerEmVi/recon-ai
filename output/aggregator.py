@@ -274,6 +274,14 @@ class ResultAggregator:
                         self.usernames.add(a)
             self._prov(desc[:120], "anomaly", tool, related=d.host, confidence=cat)
 
+        elif etype == "EMAIL":
+            addr = (getattr(d, "address", "") or "").lower().strip()
+            if addr:
+                self.emails.add(addr)
+                self._prov(addr, "email", tool,
+                           related=getattr(d, "found_in", None),
+                           confidence=getattr(d, "source", None))
+
         elif etype == "FINDING_CANDIDATE":
             ev = getattr(d, "evidence", None) or {}
             self.findings.append({"host": d.host, "title": d.title, "category": d.category,
@@ -483,7 +491,7 @@ class ResultAggregator:
             "permutations": "Permutations", "httpx_probe": "HTTP probing",
             "fingerprint": "Technology detection", "whatweb": "Technology detection",
             "katana": "Crawler", "apifinder": "API discovery", "js_intel": "JavaScript analysis",
-            "linkfinder": "JavaScript analysis", "dirsearch": "Content discovery",
+            "linkfinder": "JavaScript analysis",
             "paramfinder": "Parameter discovery", "cloud_intel": "Cloud asset intelligence",
             "censys": "Censys", "metascan": "File/metadata analysis", "secretfinder": "Secret detection",
             "trufflehog": "Secret detection",

@@ -48,6 +48,7 @@ class EventType(str, enum.Enum):
     PARAMETER           = "PARAMETER"
     ANOMALY             = "ANOMALY"
     FINDING_CANDIDATE   = "FINDING_CANDIDATE"
+    EMAIL               = "EMAIL"
 
 
 # ── per-type data schemas ─────────────────────────────────────────────────────
@@ -318,11 +319,38 @@ class FindingCandidateData(BaseModel):
         return {_cap(str(k), 64): _cap(str(val), 512) for k, val in list(v.items())[:20]}
 
 
+class EmailData(BaseModel):
+    """An email address discovered for the target.
+
+    Emails are PII: this type exists so email discovery is explicit and opt-in,
+    and so the scope gate / dedup treat addresses as first-class. Producers must
+    restrict to in-scope domains (don't hoard unrelated third-party addresses).
+    """
+    address: str                  # the email address, normalized to lowercase
+    source: str                   # web-body | mailto | document-metadata | …
+    found_in: str | None = None   # URL or document the address was found in
+
+    @field_validator("address")
+    @classmethod
+    def _v_address(cls, v: str) -> str:
+        return _cap(v.strip().lower(), 254)   # RFC 5321 max length
+
+    @field_validator("source")
+    @classmethod
+    def _v_source(cls, v: str) -> str:
+        return _cap(v, 64)
+
+    @field_validator("found_in")
+    @classmethod
+    def _v_found_in(cls, v: str | None) -> str | None:
+        return _cap(v, 2048) if v else v
+
+
 # Union of all concrete data types
 EventData = Union[
     SubdomainData, DnsRecordData, IpData, OpenPortData,
     HttpServiceData, TechnologyData, UrlData, EndpointData,
-    ParameterData, AnomalyData, FindingCandidateData,
+    ParameterData, AnomalyData, FindingCandidateData, EmailData,
 ]
 
 

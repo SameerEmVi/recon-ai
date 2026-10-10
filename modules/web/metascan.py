@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 import re
 
 from events.types import (
-    AnomalyData, Event, EventType, FindingCandidateData, TechnologyData,
+    AnomalyData, EmailData, Event, EventType, FindingCandidateData, TechnologyData,
 )
 from modules.base import BaseModule
 from modules.registry import register
@@ -55,6 +55,24 @@ _SOFTWARE_HINT = re.compile(
     r"ghostscript|quartz|skia|wkhtmltopdf|itext|reportlab|docx|version|v?\d+\.\d+)\b"
 )
 _VERSION_RE = re.compile(r"^(?P<name>.*?)[\s/v]*(?P<version>\d+(?:\.\d+)+)\s*$")
+
+
+_EMAIL_RE = re.compile(
+    r"\b([A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24})\b"
+)
+
+
+def _emails_in_meta(meta: dict) -> list[str]:
+    """Email addresses embedded in document metadata values (author/creator/…)."""
+    out: list[str] = []
+    for v in meta.values():
+        if not isinstance(v, str):
+            continue
+        for m in _EMAIL_RE.finditer(v):
+            addr = m.group(1).strip().lower()
+            if addr not in out:
+                out.append(addr)
+    return out
 
 
 def _authoring_tech(meta: dict) -> tuple[str, str | None] | None:
@@ -84,7 +102,7 @@ class MetaScanModule(BaseModule):
     name = "metascan"
     description = "Document/image metadata analysis (exiftool if present, else pure-Python EXIF/OOXML/PDF)"
     watched_events = ["URL"]
-    produced_events = ["TECHNOLOGY", "ANOMALY", "FINDING_CANDIDATE"]
+    produced_events = ["TECHNOLOGY", "ANOMALY", "FINDING_CANDIDATE", "EMAIL"]
     flags = ["active", "web", "metadata"]
     expected_value = 8
     options = {
@@ -177,6 +195,16 @@ class MetaScanModule(BaseModule):
                 ),
                 source_event=event,
             )
+
+        # Emails embedded in metadata (author/creator/…) → EMAIL
+        # (scope gate drops out-of-scope domains).
+        if host:
+            for addr in _emails_in_meta(meta):
+                await self.emit(
+                    EventType.EMAIL,
+                    EmailData(address=addr, source="document-metadata", found_in=url),
+                    source_event=event,
+                )
 
         await self._feed_learning(meta)
         self._log.info("metascan: %s → %d metadata field(s)%s",

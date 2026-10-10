@@ -197,7 +197,7 @@ class KnowledgeBase:
     async def export_to_file(self, category: str, path: str, **kwargs) -> int:
         """Write a generated wordlist to `path` (one token per line). Returns the
         number of words written. The file can be consumed directly by the
-        dirsearch module via its ``wordlist=<path>`` option."""
+        ffuf module via its ``wordlist=<path>`` option."""
         words = await self.generate_wordlist(category, **kwargs)
         with open(path, "w", encoding="utf-8") as fh:
             for w in words:
