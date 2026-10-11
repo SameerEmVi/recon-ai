@@ -142,6 +142,9 @@ class ResultAggregator:
         self._domain_src: dict[str, set[str]] = defaultdict(set)
         # Optional LLM intelligence, attached before write() by the controller.
         self._intelligence: dict | None = None
+        # Optional vulnerability-assessment report, attached before write() by
+        # the vulnassess module (mirrors attach_intelligence — one writer).
+        self._vuln: dict | None = None
 
     def new_domains_vs_latest(self, domain: str) -> list[str]:
         """Subdomains not present in the previous `latest/` scan — the current-vs-
@@ -161,6 +164,13 @@ class ResultAggregator:
         intelligence.txt and appends its sections to summary.txt. No module
         writes its own files — everything still flows through this writer."""
         self._intelligence = {"lines": list(intel_lines), "summary_sections": list(summary_sections)}
+
+    def attach_vuln_report(self, txt_lines: list[str], json_str: str, summary_sections: list[str]) -> None:
+        """Attach the vulnerability-assessment report so the single writer emits
+        vulnerabilities.txt / vulnerabilities.json and appends its sections to
+        summary.txt. Like attach_intelligence, no module writes its own files."""
+        self._vuln = {"lines": list(txt_lines), "json": json_str,
+                      "summary_sections": list(summary_sections)}
 
     # ── observation ────────────────────────────────────────────────────────────
 
@@ -523,6 +533,8 @@ class ResultAggregator:
         lines += ["", "Sources:"] + [f"- {s}" for s in self._source_categories()]
         if self._intelligence and self._intelligence.get("summary_sections"):
             lines += list(self._intelligence["summary_sections"])
+        if self._vuln and self._vuln.get("summary_sections"):
+            lines += list(self._vuln["summary_sections"])
         return "\n".join(lines) + "\n"
 
     # ── writing ───────────────────────────────────────────────────────────────
@@ -569,6 +581,8 @@ class ResultAggregator:
             "data-exposure/summary.txt": self._data_exposure_summary(de),
             **{f"data-exposure/{k}": v for k, v in de.items()},
             **({"intelligence.txt": self._intelligence["lines"]} if self._intelligence else {}),
+            **({"vulnerabilities.txt": self._vuln["lines"],
+                "vulnerabilities.json": self._vuln["json"]} if self._vuln else {}),
         }
 
     def write(self, domain: str) -> str:

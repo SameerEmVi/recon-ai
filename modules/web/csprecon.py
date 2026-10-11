@@ -73,6 +73,8 @@ class CspReconModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["SUBDOMAIN"]
     flags = ["active", "web", "subdomain-enum", "fast"]
+    # Behaviour: reads the target's CSP header via a direct request → active.
+    capabilities = ["TARGET_HTTP_REQUEST"]
     options = {"timeout": 20, "max_body_kb": 512}
 
     async def setup(self) -> bool:

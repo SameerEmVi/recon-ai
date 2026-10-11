@@ -56,6 +56,9 @@ class ScanController:
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
+        # Execution mode & capability policy (osint | active | vuln | full)
+        mode: str = "active",
+        intrusive_authorized: bool = False,
         # Adaptive Reconnaissance Planner
         plan_mode: str = "default",          # passive-first | default | aggressive
         plan_budget: int = 0,                # max module executions; 0 = unlimited
@@ -71,6 +74,11 @@ class ScanController:
         self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
+        # Central capability policy — fail-closed on an invalid mode.
+        from policy import CapabilityPolicy
+        self._policy = CapabilityPolicy(mode, intrusive_authorized=intrusive_authorized)
+        self._mode = mode
+        self._disabled_modules: list[tuple[str, str]] = []
         from planner import PlannerConfig, ReconPlanner
         self._planner = ReconPlanner(
             PlannerConfig(mode=plan_mode, max_executions=plan_budget)
@@ -84,6 +92,11 @@ class ScanController:
         self._enabled_modules = enabled_modules
         self._enabled_flags = enabled_flags
         self._module_config = module_config or {}
+        # osint safety override: cloud_intel's optional active bucket verification
+        # must never fire in a passive scan (the fetch gate also denies it).
+        if mode == "osint":
+            ci = {**self._module_config.get("cloud_intel", {}), "verify": False}
+            self._module_config = {**self._module_config, "cloud_intel": ci}
         self._db_url = db_url
         self._anthropic_api_key = anthropic_api_key
         self._ai_model = ai_model
@@ -336,6 +349,17 @@ class ScanController:
         return self._response_cache
 
     @property
+    def aggregator(self):
+        """Central Result Aggregator (None when --no-results). Modules may attach
+        a report section to its single writer (see ResultAggregator.attach_*)."""
+        return self._aggregator
+
+    @property
+    def policy(self):
+        """The scan's central CapabilityPolicy (mode/capability enforcement)."""
+        return self._policy
+
+    @property
     def ai_enabled(self) -> bool:
         return self._ai_enabled
 
@@ -394,6 +418,22 @@ class ScanController:
             )
         )
 
+        # ── central capability-policy filter (strict, before setup) ───────────
+        # A module whose behaviour-audited capabilities exceed the selected mode
+        # is dropped here — never set up, never subscribed, so it cannot run. This
+        # is the primary enforcement; the runtime gates in BaseModule are backup.
+        permitted: list["BaseModule"] = []
+        self._disabled_modules = []
+        for module in instances:
+            ok, reason = self._policy.module_allowed(type(module))
+            if ok:
+                permitted.append(module)
+            else:
+                self._disabled_modules.append((module.name, reason))
+                log.info("[policy] module disabled by mode '%s': %s — %s",
+                         self._mode, module.name, reason)
+        instances = permitted
+
         active: list["BaseModule"] = []
         for module in instances:
             ok = await module.setup()
@@ -435,8 +475,15 @@ class ScanController:
         reactive_names = [m.name for m in reactive]
         log.info("modules: seed=%s  reactive=%s", seed_names, reactive_names)
         from cli import ui
+        print(ui.kv("mode", self._policy.describe()))
         print(ui.kv("seed mods", ", ".join(seed_names) or "(none)"))
         print(ui.kv("react mods", ", ".join(reactive_names) or "(none)"))
+        if self._disabled_modules:
+            shown = ", ".join(f"{n} ({r.split('(')[0].strip()})"
+                               for n, r in self._disabled_modules[:12])
+            more = "" if len(self._disabled_modules) <= 12 else f" … +{len(self._disabled_modules)-12}"
+            print(ui.kv("disabled", f"{shown}{more}"))
+        print(ui.kv("intrusive", "enabled" if self._policy.allows("INTRUSIVE_TEST") else "disabled"))
         return seed, reactive
 
     async def _do_run(self, seed_domain: str) -> None:
@@ -492,12 +539,15 @@ class ScanController:
         # a fixed 0.2s sleep that cancelled in-flight reactive tasks.
         await self._bus.drain()
 
-        # Call finish() on every module.
+        # Call finish() on every module. Some modules (cloud_intel, vulnassess)
+        # emit their accumulated results here, so drain once more afterwards to
+        # flush those emissions (and their reactive/persist tasks) before teardown.
         for module in self._loaded_modules:
             try:
                 await module.finish()
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
+        await self._bus.drain()
 
         # Phase 3a: LLM correlation & intelligence (works without a DB — operates
         # on the aggregator's in-memory structured evidence, attached to the writer).

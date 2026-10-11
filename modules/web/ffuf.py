@@ -47,8 +47,8 @@ from recon.ffuf import (
 )
 
 _WORDLIST_DIR = Path(__file__).parent.parent.parent / "wordlists"
-_BUNDLED_WORDLIST = _WORDLIST_DIR / "common.txt"
-_BUNDLED_BIG_WORDLIST = _WORDLIST_DIR / "big.txt"
+_BUNDLED_WORDLIST = _WORDLIST_DIR / "combined.txt"   # deduped union of the former common/big/dirs/files lists
+_BUNDLED_BIG_WORDLIST = _BUNDLED_WORDLIST
 _SECLISTS_CANDIDATES = [
     "/usr/share/seclists/Discovery/Web-Content/common.txt",
     "/usr/share/wordlists/seclists/Discovery/Web-Content/common.txt",

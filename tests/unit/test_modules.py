@@ -596,17 +596,13 @@ def test_gowitness_watches_http_service():
 
 def test_bundled_wordlist_exists():
     from pathlib import Path
-    wl_dir = Path(__file__).parent.parent.parent / "wordlists"
-    common = wl_dir / "common.txt"
-    big = wl_dir / "big.txt"
-    assert common.exists(), f"bundled wordlist missing at {common}"
-    assert len(common.read_text().splitlines()) > 50, "common wordlist too small"
-    # big.txt must exist and be a proper superset of common.txt.
-    assert big.exists(), f"big wordlist missing at {big}"
-    common_set = {l.strip() for l in common.read_text().splitlines() if l.strip()}
-    big_set = {l.strip() for l in big.read_text().splitlines() if l.strip()}
-    assert len(big_set) > len(common_set), "big wordlist should be larger than common"
-    assert common_set <= big_set, "big wordlist should include all of common"
+    wl = Path(__file__).parent.parent.parent / "wordlists" / "combined.txt"
+    assert wl.exists(), f"bundled wordlist missing at {wl}"
+    lines = [l.strip() for l in wl.read_text().splitlines()]
+    assert len(lines) > 50, "bundled wordlist too small"
+    assert all(lines), "bundled wordlist has blank lines"
+    assert len(lines) == len(set(lines)), "bundled wordlist has duplicates"
+    assert not any(l.startswith("/") for l in lines), "entries must not start with '/'"
 
 
 def test_httpx_probe_watches_subdomain():

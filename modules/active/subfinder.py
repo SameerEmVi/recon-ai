@@ -21,6 +21,9 @@ class SubfinderModule(BaseModule):
     watched_events = []
     produced_events = ["SUBDOMAIN"]
     flags = ["active", "subdomain-enum"]
+    # Behaviour: queries passive sources via the subfinder binary — never contacts
+    # the target. The "active" flag is historical; the capability is passive.
+    capabilities = ["PASSIVE_EXTERNAL"]
     options = {"timeout": 120}
     deps_binary = ["subfinder"]
 

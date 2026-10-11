@@ -83,6 +83,41 @@ already-discovered paths (`app.js` → `app.js.map`/`.bak`, `download.php` →
 `download.bak`) to surface source maps, backups, configs and dumps that a
 word-based fuzzer can't reach.
 
+### Execution modes
+
+Scans are **mode-based** — `--mode` is both the default module set and a
+capability ceiling enforced centrally (at module loading, the network
+primitives, and the AI agent tools), not just CLI filtering:
+
+| Mode | What runs | Guarantee |
+|---|---|---|
+| `osint` | passive external intelligence only | **technically unable** to send any direct target request, DNS brute, fuzzing, port scan or vuln check |
+| `vuln` | minimal discovery + vulnerability assessment | no fuzzing / port scanning / brute force |
+| `active` | passive + full active recon + non-intrusive vuln checks | intrusive tier off unless `--intrusive` |
+| `full` | complete authorized pipeline | intrusive tier off unless `--intrusive` |
+
+```bash
+recon-ai scan example.com --mode osint     # passive only
+recon-ai scan example.com --mode active     # active recon + assessment
+```
+
+Each module is classified by **behaviour** (what it does to the target), not by
+name — so `subfinder` (passive API queries) runs in `osint`, while `metascan`
+(downloads files from the target) does not. The ScopeEngine remains the
+authoritative scope gate; a mode never widens scope. Legacy `--profile`/`--full`/
+`--passive`/`-m` still work and are filtered by the mode ceiling (no `--mode` →
+unchanged, active-ceiling behaviour).
+
+On top of reconnaissance, the **vulnassess** module (the `vulnscan/` package)
+runs an evidence-based vulnerability assessment over the discovered intelligence
+— technology-aware native checks (security headers, cookies, version→CVE
+correlation with uncertainty, exposed admin/debug interfaces, API surface,
+non-destructive reflected-input indicators) producing structured findings with a
+verification status (`OBSERVED`/`POTENTIAL`/`UNCONFIRMED`/`CONFIRMED`), confidence
+and remediation. It never claims a CVE from a version string alone, and intrusive
+testing is off unless explicitly authorized. Render the report with
+`recon-ai report <domain> --db-url … [--json]`.
+
 **See [INSTALL.md](INSTALL.md) for the full installation guide** — prerequisites,
 Go/recon-binary setup, the Windows `httpx` PATH gotcha, database and AI
 configuration, verification, and troubleshooting.

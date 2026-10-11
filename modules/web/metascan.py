@@ -104,6 +104,9 @@ class MetaScanModule(BaseModule):
     watched_events = ["URL"]
     produced_events = ["TECHNOLOGY", "ANOMALY", "FINDING_CANDIDATE", "EMAIL"]
     flags = ["active", "web", "metadata"]
+    # Behaviour: downloads files directly FROM the target → active target HTTP
+    # (not passive, despite "metadata extraction").
+    capabilities = ["TARGET_HTTP_REQUEST"]
     expected_value = 8
     options = {
         "timeout": 25,
