@@ -77,6 +77,9 @@ DISCOVERY_MODULES = ["ffuf", "extfuzz", "linkfinder", "paramfinder", "apifinder"
 # Cloud asset intelligence + storage / bucket exposure.
 CLOUD_MODULES = ["cloud_intel", "s3scanner", "cloud_enum"]
 
+# Evidence-based vulnerability assessment over recon intelligence (native checks).
+ASSESS_MODULES = ["vulnassess"]
+
 # Horizontal discovery: sibling ROOT domains owned by the same org (reported,
 # never scanned). Passive (DoH + crt.sh), so safe to include in the fast profile.
 RELATED_MODULES = ["related_domains"]
@@ -93,6 +96,7 @@ FULL_MODULES = (
     + CRAWL_MODULES
     + DISCOVERY_MODULES
     + CLOUD_MODULES
+    + ASSESS_MODULES
 )
 
 # ── Scan profiles ─────────────────────────────────────────────────────────────
@@ -256,6 +260,12 @@ class ModuleRegistry:
     def all_names(cls) -> list[str]:
         cls.discover()
         return sorted(_registry)
+
+    @classmethod
+    def get(cls, name: str) -> type[BaseModule] | None:
+        """Return a registered module class by name (or None). Triggers discovery."""
+        cls.discover()
+        return _registry.get(name)
 
     @classmethod
     def info(cls) -> list[dict]:

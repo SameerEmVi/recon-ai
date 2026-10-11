@@ -130,6 +130,7 @@ async def _run_scan_bg(
     ai_model: str,
     rate_limit: float | None,
     max_concurrency: int | None,
+    mode: str,
 ) -> None:
     """Background task that runs the full scan lifecycle."""
     from controller.controller import ScanController
@@ -142,10 +143,17 @@ async def _run_scan_bg(
             max_distance=max_distance,
             wildcard_includes_apex=wildcard_apex,
         )
+        enabled = None
+        if mode is not None:
+            from modules.registry import ModuleRegistry
+            from policy import CapabilityPolicy
+            enabled = CapabilityPolicy(mode).default_module_names(ModuleRegistry.get)
         controller = ScanController(
             scope,
+            mode=mode or "active",
             ai_enabled=ai,
             agent_enabled=agent,
+            enabled_modules=enabled,
             db_url=db_url,
             anthropic_api_key=api_key,
             ai_model=ai_model,
@@ -176,6 +184,7 @@ async def start_scan(
     ai_model: str = "claude-sonnet-4-6",
     rate_limit: float | None = None,
     max_concurrency: int | None = None,
+    mode: str = "active",
 ) -> dict:
     """
     Start a reconnaissance scan against an authorized domain.
@@ -199,9 +208,17 @@ async def start_scan(
     rate_limit      Max requests/sec per bucket. None = unlimited (adaptive WAF
                     backoff still applies if the target starts blocking).
     max_concurrency Max simultaneous recon operations. None = unlimited.
+    mode            Execution mode / capability ceiling, enforced centrally:
+                    "osint" (passive only — no target probing), "vuln" (minimal
+                    discovery + vulnerability assessment), "active" (default — full
+                    active recon + non-intrusive checks), "full". The mode cannot
+                    be exceeded by any module or agent action.
 
     IMPORTANT: Only scan domains you are explicitly authorized to test.
     """
+    from policy import MODES as _MODES
+    if mode not in _MODES:
+        return {"error": f"invalid mode {mode!r}; valid: {', '.join(_MODES)}"}
     effective_db_url = _resolve_db_url(db_url)
     resolved_in = list(in_scope) if in_scope else [f"*.{domain}", domain]
     resolved_out = list(out_scope) if out_scope else []
@@ -230,6 +247,7 @@ async def start_scan(
             ai_model=ai_model,
             rate_limit=rate_limit,
             max_concurrency=max_concurrency,
+            mode=mode,
         )
     )
 

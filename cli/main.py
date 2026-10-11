@@ -132,7 +132,25 @@ def scan(
     ),
     full: bool = typer.Option(
         False, "--full",
-        help="Enable ALL modules: default + passive + web + crawl + discovery.",
+        help="Enable ALL modules: default + passive + web + crawl + discovery. "
+             "(Legacy; prefer --mode full. Equivalent to --mode full when no --mode given.)",
+    ),
+    mode: str | None = typer.Option(
+        None, "--mode",
+        help=(
+            "Execution mode — the central capability ceiling AND default module set:\n"
+            "osint = passive external intel only (NO target probing/fuzzing/scanning); "
+            "vuln = minimal discovery + vulnerability assessment; "
+            "active = passive + full active recon + non-intrusive vuln checks; "
+            "full = complete authorized pipeline. "
+            "Enforced throughout execution (incl. the AI agent). Omit = legacy behaviour "
+            "(active ceiling + your -m/--profile/--full selection)."
+        ),
+    ),
+    intrusive: bool = typer.Option(
+        False, "--intrusive",
+        help="Authorize the INTRUSIVE check tier (active/full modes only). Off by "
+             "default; requires explicit opt-in. Never enables destructive payloads.",
     ),
     # ── related (sibling) root domains ────────────────────────────────────────
     related: bool = typer.Option(
@@ -255,6 +273,17 @@ def scan(
         typer.echo(f"[error] unknown --plan-mode {plan_mode!r}. Available: {', '.join(MODES)}", err=True)
         raise typer.Exit(code=1)
 
+    # Execution mode = the central capability ceiling. Fail-closed on an invalid
+    # value; default "active" preserves legacy behaviour when --mode is omitted.
+    from policy import MODES as EXEC_MODES
+    if mode is not None and mode not in EXEC_MODES:
+        typer.echo(f"[error] unknown --mode {mode!r}. Available: {', '.join(EXEC_MODES)}", err=True)
+        raise typer.Exit(code=1)
+    exec_mode = mode or "active"
+    if intrusive and exec_mode not in ("active", "full"):
+        typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' mode (only active/full)"))
+    user_selected = profile is not None or bool(list(module)) or full or passive
+
     # Resolve module selection — profiles take precedence.
     from modules.registry import DEFAULT_MODULES, FULL_MODULES, PASSIVE_MODULES, SCAN_PROFILES
     profile_config: dict = {}
@@ -284,6 +313,19 @@ def scan(
         enabled_modules = None
         enabled_flags = ["passive"] if passive else None
 
+    # --mode drives the DEFAULT module set when the user gave no explicit
+    # selection; otherwise it is purely the capability ceiling (the controller
+    # filters whatever was selected). Either way the controller enforces it.
+    if mode is not None:
+        if not user_selected:
+            from modules.registry import ModuleRegistry
+            from policy import CapabilityPolicy
+            _pol = CapabilityPolicy(exec_mode, intrusive_authorized=intrusive)
+            enabled_modules = _pol.default_module_names(ModuleRegistry.get)
+            enabled_flags = None
+        else:
+            typer.echo(ui.kv("note", f"--mode {exec_mode} ceiling applied to your module selection"))
+
     # --related adds the module to whatever set was chosen above. With --passive
     # it is already included (it carries the "passive" flag).
     related = related or related_http or bool(brand) or bool(org)
@@ -300,12 +342,13 @@ def scan(
 
     typer.echo(ui.kv("in-scope", resolved_in))
     typer.echo(ui.kv("out-scope", resolved_out or "(none)"))
-    mode_label = "A — deterministic"
+    typer.echo(ui.kv("exec-mode", exec_mode + ("  +intrusive" if (intrusive and exec_mode in ('active', 'full')) else "")))
+    ai_label = "A — deterministic"
     if agent:
-        mode_label = "B+agent — AI triage + agent loop"
+        ai_label = "B+agent — AI triage + agent loop"
     elif ai_effective:
-        mode_label = "B — AI-assisted"
-    typer.echo(ui.kv("mode", mode_label))
+        ai_label = "B — AI-assisted"
+    typer.echo(ui.kv("ai-mode", ai_label))
     if plan_mode != "default" or budget:
         typer.echo(ui.kv("planner", f"{plan_mode}" + (f" (budget {budget})" if budget else "")))
     typer.echo(ui.kv("db", db_url or "(none — in-memory only)"))
@@ -326,11 +369,20 @@ def scan(
     if ai_effective and not api_key:
         typer.echo(ui.warn("ANTHROPIC_API_KEY not set — triage will be skipped"), err=True)
 
+    # Unlock the vulnassess intrusive tier only when authorized in an active/full mode.
+    intrusive_ok = intrusive and exec_mode in ("active", "full")
+    if intrusive_ok:
+        profile_config = {**(profile_config or {}),
+                          "vulnassess": {**(profile_config or {}).get("vulnassess", {}),
+                                         "intrusive": True, "authorized_intrusive": True}}
+
     from controller.controller import ScanController
     controller = ScanController(
         scope,
         ai_enabled=ai_effective,
         agent_enabled=agent,
+        mode=exec_mode,
+        intrusive_authorized=intrusive_ok,
         enabled_modules=enabled_modules,
         enabled_flags=enabled_flags,
         module_config=profile_config or None,
@@ -429,6 +481,59 @@ async def _triage(
         )
         report = await t.assess_scan(scan_id, scan.target_domain)
         typer.echo(report.print_summary())
+
+
+# ── report ───────────────────────────────────────────────────────────────────
+
+@app.command()
+def report(
+    target: str = typer.Argument(..., help="Scan UUID, or a domain (uses its most recent scan)."),
+    db_url: str = typer.Option(..., "--db-url", help="Database URL."),
+    json_out: bool = typer.Option(False, "--json", help="Emit structured JSON instead of text."),
+    output: str | None = typer.Option(None, "-O", "--output", help="Write to a file instead of stdout."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Render the evidence-based vulnerability report for a scan (text or JSON).
+
+    Reads persisted findings — run a scan with --db-url --full first.
+    """
+    _setup_logging(verbose)
+    asyncio.run(_report(target, db_url, json_out, output))
+
+
+async def _report(target: str, db_url: str, json_out: bool, output: str | None) -> None:
+    from database.repository import FindingRepository, ScanRepository
+    from database.session import init_db, make_engine, make_session_factory
+    from vulnscan.report import build_report, render_json, render_text, result_from_finding
+
+    engine = make_engine(db_url)
+    await init_db(engine)
+    async with make_session_factory(engine)() as session:
+        scan_repo = ScanRepository(session)
+        scan = None
+        try:
+            scan = await scan_repo.get(uuid.UUID(target))
+            domain = scan.target_domain if scan else target
+        except ValueError:
+            recent = await scan_repo.recent(target, limit=1)
+            scan = recent[0] if recent else None
+            domain = target
+        if scan is None:
+            typer.echo(f"[error] no scan found for {target!r}", err=True)
+            raise typer.Exit(code=1)
+
+        findings = await FindingRepository(session).list_for_scan(scan.id)
+
+    results = [r for r in (result_from_finding(f) for f in findings) if r is not None]
+    rep = build_report(domain, results, scan_id=scan.id)
+    text = render_json(rep) if json_out else "\n".join(render_text(rep))
+
+    if output:
+        with open(output, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        typer.echo(f"report written → {output}  ({len(results)} finding(s))")
+    else:
+        typer.echo(text)
 
 
 # ── history ────────────────────────────────────────────────────────────────────

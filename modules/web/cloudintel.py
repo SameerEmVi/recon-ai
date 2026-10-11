@@ -47,6 +47,10 @@ class CloudIntelModule(BaseModule):
     watched_events = ["SUBDOMAIN", "DNS_RECORD", "HTTP_SERVICE", "TECHNOLOGY", "URL"]
     produced_events = ["TECHNOLOGY", "ANOMALY", "FINDING_CANDIDATE"]
     flags = ["passive", "web", "cloud", "correlation"]
+    # Behaviour: passive signal correlation only. Its optional active bucket
+    # verification is forced off outside active/full modes (controller injects
+    # verify=False in osint; the fetch gate denies it regardless).
+    capabilities = ["PASSIVE_EXTERNAL"]
     expected_value = 8
     options = {
         "min_confidence": 0.5,   # emit a cloud-asset ANOMALY at/above this

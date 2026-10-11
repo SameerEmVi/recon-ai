@@ -53,6 +53,13 @@ class BaseModule(ABC):
     # External binaries this module requires (checked in default setup()).
     deps_binary: ClassVar[list[str]] = []
 
+    # Capability declaration (central mode/capability policy — see policy/).
+    # Classified by BEHAVIOUR (what the module does to the target), never by name
+    # or flags. Empty = fall back to the authoritative policy.MODULE_CAPABILITIES
+    # table; set this on a module to self-declare/override. A module only loads in
+    # a mode whose allowed capabilities are a superset of these.
+    capabilities: ClassVar[list[str]] = []
+
     # ── Adaptive Reconnaissance Planner metadata ──────────────────────────────
     # Consumed by planner.ReconPlanner to decide *whether* this module is worth
     # running for a given discovery, instead of blindly firing on every event.
@@ -155,6 +162,12 @@ class BaseModule(ABC):
         from ratelimit import get_limiter
         return get_limiter(self._ctrl)
 
+    @property
+    def policy(self):
+        """The scan's central CapabilityPolicy (ALLOW_ALL under a mock controller)."""
+        from policy import get_policy
+        return get_policy(self._ctrl)
+
     def guard(self, bucket: str | None = None):
         """Async context manager wrapping one network op with rate limiting.
 
@@ -212,6 +225,17 @@ class BaseModule(ABC):
             get_response_cache,
         )
         from urllib.parse import urlparse
+        from policy import CAP_TARGET_HTTP_REQUEST, CapabilityDenied
+
+        # Central mode gate (defence-in-depth on top of module-load filtering): a
+        # direct HTTP request to a discovered target is only permitted when the
+        # mode allows TARGET_HTTP_REQUEST. Deny gracefully (never crash a passive
+        # module that tries, e.g., an optional verify step).
+        try:
+            self.policy.check(CAP_TARGET_HTTP_REQUEST, who=f"module '{self.name}' fetch")
+        except CapabilityDenied as exc:
+            self._log.warning("fetch denied by mode policy: %s", exc)
+            return FetchResult(url=url, ok=False, error=f"capability denied: {exc}")
 
         async def _do_fetch() -> "FetchResult":
             try:
@@ -267,6 +291,12 @@ class BaseModule(ABC):
         limits via guard(), and never raise into the event loop.
         """
         import asyncio
+        # Central mode gate: a subprocess is a module action, so re-verify the
+        # module is permitted in this mode before launching a binary.
+        ok, reason = self.policy.module_allowed(type(self))
+        if not ok:
+            self._log.warning("run_proc(%s) denied by mode policy: %s", cmd[0] if cmd else "?", reason)
+            return None
         try:
             async with self.guard(bucket or f"proc:{self.name}"):
                 try:
