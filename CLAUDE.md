@@ -129,6 +129,108 @@ Modules that need **bytes** rather than text, or send custom per-request headers
 (metascan's file download, corscanner's `Origin` probes, csprecon), keep their own
 client on purpose — a URL-keyed GET cache would be wrong for them.
 
+## Evidence-based vulnerability assessment (`vulnscan/`)
+
+`vulnscan/` is a *reasoning + light-verification* layer on top of recon — it turns
+the reconnaissance intelligence recon-ai already produces into structured,
+evidence-backed vulnerability results. It is **not** a scanner bolt-on, and it
+preserves the deterministic-vs-LLM split: deterministic code owns detection,
+verification and the **status** field; the LLM only annotates (via the existing
+triage pass) and can never invent a finding or promote one to CONFIRMED.
+
+- **Consistent check interface** (`vulnscan/checks.py::Check`): id / name /
+  category / **tier** (`passive` · low-impact `active` · `intrusive`) /
+  `supported_technologies` / `prerequisites` / `required_evidence` /
+  `verification` / `applies(ctx)` / `run(ctx)`. Checks register in an internal
+  check registry (`register_check`); the *capability* plugs into the existing
+  module registry as one module, **vulnassess**.
+- **Result schema** (`vulnscan/schema.py::VulnResult`): asset + affected URL,
+  category + check id, evidence + detection method, **confidence** (0..1),
+  severity + rationale, **verification status** (`OBSERVED` / `POTENTIAL` /
+  `UNCONFIRMED` / `CONFIRMED`), remediation, references (CVE/CWE), source module
+  + timestamp. A VulnResult is **projected onto the existing `FINDING_CANDIDATE`
+  event** (`to_finding_data`, category `vuln:<check_id>`), folding all structured
+  fields into the finding's `evidence` JSON — so scope, dedup
+  (`host:title:category`), persistence, history/diff, the aggregator and AI
+  triage all apply **with no event/DB schema change**.
+- **Native checks** (`vulnscan/checks.py`): `security-headers`, `cookie-security`
+  (names only, never cookie values), `info-disclosure` (version banners),
+  `known-cve` (version→CVE correlation — **never CONFIRMED on a version string**;
+  `vulnscan/cve.py` is tolerant-semver + conservative, returns POTENTIAL /
+  UNCONFIRMED with backport/patch caveats), `exposed-interface`
+  (admin/debug/diagnostic, reachability-gated), `api-exposure` (GraphQL/OpenAPI
+  surface — introspection is **not** sent), `reflected-input` (a **benign,
+  non-executing canary** echoed verbatim → POTENTIAL indicator, never an XSS
+  claim), and `normalize-existing` (consumes CORS / exposed-file / secret /
+  source-map / cloud / takeover findings other modules already emitted into the
+  unified schema, `emit=False` so they enrich the report **without** duplicating
+  events).
+- **Technology-aware selection** (`vulnscan/engine.py`): events accumulate into a
+  per-host `AssessmentState` during the scan; at `finish()` (full fingerprint
+  known) one `CheckContext` per host is built and only applicable checks run
+  (tier + technology + prerequisite gated — "not every check on every URL").
+  Active header/cookie checks share **one** low-impact GET per service through
+  `BaseModule.fetch` (limiter / WAF backoff / cache). Each check is isolated (a
+  raised check is recorded `failed`, never breaks the run), and results dedupe
+  across checks/hosts (strongest severity+confidence wins).
+- **Safety / tiers** (requirement): passive + low-impact active run by default;
+  the **intrusive tier is disabled** unless BOTH `intrusive=True` **and**
+  `authorized_intrusive=True`, and no destructive payloads are implemented. All
+  network I/O is through the shared limiter; candidates only ever target
+  already-in-scope hosts; emission is scope-gated via `self.emit`.
+- **Reporting** (`vulnscan/report.py`): structured JSON + a human-readable report
+  (executive summary · findings by severity/confidence · affected assets ·
+  evidence + verification status · remediation · checks executed/skipped/failed ·
+  limitations). The **vulnassess** module attaches it to the aggregator's single
+  writer (`attach_vuln_report` → `vulnerabilities.txt`/`.json` + a summary
+  section, mirroring `attach_intelligence`); the `recon-ai report` CLI renders it
+  from persisted findings.
+
+Controller wiring: `ScanController` exposes `aggregator` (read-only) and calls
+`bus.drain()` **again after** the `finish()` loop so finish-time emissions
+(vulnassess, cloud_intel) and their persist tasks flush before teardown.
+
+## Execution modes & central capability policy (`policy/`)
+
+Recon-ai is **mode-based**. The CLI `--mode` selects one of four modes, which is
+both the **default module set** and a **capability ceiling enforced centrally**
+(not merely CLI filtering), so e.g. an `osint` scan is *technically unable* to
+launch active target probes — including via the AI agent, event callbacks, or
+fallback paths.
+
+- **Capabilities** (`policy/policy.py`): `PASSIVE_EXTERNAL`, `TARGET_DNS_QUERY`,
+  `TARGET_HTTP_REQUEST`, `ACTIVE_DISCOVERY`, `FUZZING`, `PORT_SCANNING`,
+  `VULNERABILITY_CHECK`, `INTRUSIVE_TEST`. Each module is classified by
+  **behaviour** (what it does to the target), never by name/flags — the
+  authoritative table is `MODULE_CAPABILITIES`, and a module may self-declare via
+  a `capabilities` ClassVar (precedence: ClassVar > table > fail-closed). This is
+  why `subfinder` (flagged "active") is `PASSIVE_EXTERNAL`, and `metascan` /
+  `csprecon` (which hit the target directly) are not passive.
+- **Modes → allowed capabilities**: `osint` = `{PASSIVE_EXTERNAL}`; `vuln` =
+  `{PASSIVE_EXTERNAL, TARGET_DNS_QUERY, TARGET_HTTP_REQUEST, VULNERABILITY_CHECK}`;
+  `active` / `full` = all except `INTRUSIVE_TEST`. `INTRUSIVE_TEST` unlocks only
+  with `--intrusive` **and** mode ∈ {active, full}. A module runs only if **all**
+  its capabilities ⊆ the mode's allowed set.
+- **Enforcement points** (central, fail-closed): (1) the controller filters which
+  modules load/subscribe (`CapabilityPolicy.module_allowed`), recording disabled
+  modules + reasons; (2) `BaseModule.fetch` denies `TARGET_HTTP_REQUEST` and
+  `run_proc` re-checks `module_allowed` at the moment of action; (3)
+  `build_tool_registry` omits agent tools whose capability the mode forbids and
+  each tool re-checks at call time. `CapabilityPolicy("<bad>")` raises
+  (`CapabilityDenied`); an unclassified module is permitted only in `full`.
+  `get_policy(controller)` returns `ALLOW_ALL` for mock controllers (test-safety,
+  mirrors `ratelimit.get_limiter`). The **ScopeEngine stays authoritative for
+  scope** — mode never widens scope; it is an orthogonal, additional gate.
+- **osint guarantees**: no direct target HTTP, no DNS resolution/brute, no
+  fuzzing/port scanning/vuln checks; `cloud_intel`'s optional active bucket
+  verify is forced off. Unavailable passive sources warn-and-skip (no active
+  fallback).
+- **CLI / migration**: `--mode` is the primary selector. Legacy `--profile`,
+  `--full`, `--passive`, `-m` still choose *candidate* modules but are filtered by
+  the mode ceiling (a note is printed). With **no** `--mode`, behaviour is
+  unchanged (ceiling defaults to `active`, legacy selection applies) — fully
+  backward-compatible. `--mode full` supersedes `--full`.
+
 ## Architecture (BBOT-style, event-driven)
 
 `Event` (12 types in `events/types.py`: SUBDOMAIN, DNS_RECORD, IP, OPEN_PORT,
@@ -181,6 +283,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 - Cloud Asset Intelligence: **cloud_intel** (`modules/web/cloudintel.py` + pure engine `recon/cloudintel.py`) is an evidence-based correlation subsystem (passive; no binary) that identifies the cloud infrastructure behind an authorized target. Watches `SUBDOMAIN`+`DNS_RECORD`+`HTTP_SERVICE`+`TECHNOLOGY`+`URL` and correlates signals from DNS/CNAME targets, HTTP `server` headers + header names (`x-amz-*`/`x-goog-*`/`x-azure-ref`/`cf-ray`…), fingerprinted technologies, and cloud URLs referenced in JS/config. Fingerprint DB (`recon/cloudintel.py`) covers **AWS** (S3, CloudFront, ELB/ALB, API Gateway, Global Accelerator), **Azure** (Blob/Storage, App Service, Front Door/CDN, Traffic Manager, API Mgmt, SQL, Key Vault), **GCP** (GCS, App Engine, Cloud Run, Functions, APIs), **Firebase** (RTDB, Hosting, Storage), and CDNs (Cloudflare/Fastly/Akamai/StackPath/BunnyCDN/KeyCDN/CDN77). `CloudCorrelator` folds independent signals per `(host, provider, service)` with a **noisy-OR confidence** (capped at 1.0), retaining evidence + provenance sources; **dedup** is per asset key. Represents assets in the knowledge graph as live `TECHNOLOGY` events (cloud stack on the host) + one `cloud-asset` `ANOMALY` per asset (≥ `min_confidence`, default 0.5) at `finish()`. **Passive identification is separate from active verification**: `options["verify"]` (default off) does a single scope-approved, **read-only benign GET** to check for a public bucket listing → `exposed-cloud-storage` FINDING_CANDIDATE; it never enumerates, writes, authenticates, or takes destructive cloud action. All emission is scope-gated via `self.emit`. In the `CLOUD` group / `--full`.
 - Censys host enrichment: **censys** (`modules/passive/censys.py` + pure parser `recon/censys.py`) enriches discovered IPs via the Censys **Platform** API free-tier **host lookup** (`GET /v3/global/asset/host/{ip}`). Watches `DNS_RECORD` (A/AAAA) + `IP`, and for each IP emits scope-gated `ANOMALY` (`host-org` — ASN/organization + service count, the "organisation IP" intel), `OPEN_PORT`/`TECHNOLOGY` (Censys-observed services), and `SUBDOMAIN` (Censys DNS names — the scope gate drops co-tenant/junk names from shared IPs and keeps only in-scope org hostnames, which re-enter the pipeline). Note: Censys **domain search** is a paid feature (free keys get 403), so this enriches known IPs rather than enumerating from a domain. Credentials via env: `CENSYS_API_KEY` (Platform PAT `censys_…`; the module warn-and-skips without it, never logs the key), optional `CENSYS_ORG_ID` (`X-Organization-ID`, paid tiers). The key's **1-concurrent-request** limit is enforced by a dedicated `asyncio.Lock` (on top of the shared RateLimiter); `max_lookups` caps quota use. In `EXTRA_PASSIVE` / `--full` / `-p fast`.
 - Persistent reconnaissance learning system: **wordlist_learner** (`modules/web/wordlist.py` + pure engine `recon/vocabulary.py` + service `database/knowledge_base.py`) watches `URL`+`ENDPOINT`+`PARAMETER`+`TECHNOLOGY` (events the bus already scope-checked) and learns *reusable* recon vocabulary into a cross-scan store so discovery improves over time. Deterministic, network-free extraction (`recon/vocabulary.py`, no LLM): splits paths into directory/file/endpoint/api-path/api-version/resource tokens, extracts parameter **names** (and values only when `is_safe_value` — short, low-entropy, non-secret), plus JS identifiers / GraphQL names / OpenAPI paths / cloud naming patterns (13 `CATEGORIES`). Pipeline: normalize → quality-filter (rejects numeric ids, UUIDs, hash/hex blobs, hashed-asset chunks, stop-words, static assets) → **4 knowledge scopes** (`global` / `technology`=tech name / `target`=seed domain / `organization`=operator label) → dedup (DB `UniqueConstraint` on `(scope_type,scope_key,category,value)` + `(…,target)`) → **confidence scoring** (`confidence(target_count,occurrence_count)`, breadth-weighted, 0..1; a learned string is a *candidate*, never proof a resource exists) → persistence. `KnowledgeBase.generate_wordlist(category, scope, min_target/occurrence/confidence, limit)` builds a ranked, filtered list (broadest/most-confident first) exportable to a file the **ffuf** module consumes via `wordlist=<path>`. Writes are lock-serialized on its own AsyncSession. Needs `--db-url`; without it the module warn-and-skips. CLI: `recon-ai wordlist stats|export <category> [--scope … --scope-key … --min-confidence …]`. In the `DISCOVERY` group / `--full`.
+- Vulnerability assessment: **vulnassess** (`modules/web/vulnassess.py` + the `vulnscan/` package) consumes recon events (`TECHNOLOGY`/`HTTP_SERVICE`/`URL`/`ENDPOINT`/`PARAMETER`/`ANOMALY`/`FINDING_CANDIDATE`) and, at `finish()`, runs technology-aware native checks → structured, evidence-backed `FINDING_CANDIDATE`s (category `vuln:<check_id>`, with confidence + `OBSERVED`/`POTENTIAL`/`UNCONFIRMED`/`CONFIRMED` status in `evidence`). Passive + low-impact active by default; intrusive tier off unless explicitly authorized. See the **Evidence-based vulnerability assessment** section above. In the `ASSESS` group / `--full`.
 - Profiles: `fast` (passive only) · `default` · `full` · `paranoid`
 
 ## Directory map
@@ -198,11 +301,13 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `mcpserver/` | FastMCP server exposing 8 tools; `context.py` in-process scan registry |
 | `ratelimit/` | `RateLimiter` + `waf.py` — throttling & adaptive WAF backoff (used everywhere) |
 | `planner/` | `ReconPlanner` — Adaptive Reconnaissance Planner (gates which modules run; cost/value/technology/budget-aware) |
+| `policy/` | Central mode & capability policy — maps modules/actions to capabilities and enforces the selected `--mode` (osint/active/vuln/full) at module load, the network primitives, and the agent tools. ScopeEngine stays the scope gate. |
+| `vulnscan/` | Evidence-based vulnerability assessment: `schema.py` (VulnResult + status/severity), `checks.py` (Check interface + native checks + registry), `cve.py` (version→CVE correlation, uncertainty-aware), `engine.py` (per-host context + tech-aware selection + isolation), `report.py` (JSON + human report). Driven by the `vulnassess` module. |
 | `normalize/` | Output parsers |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
 | `tests/` | `security/` (scope engine) + `unit/` (609 tests, all passing) |
-| `wordlists/` | `common.txt`, `dns_names.txt` |
+| `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
 
@@ -213,9 +318,14 @@ Repo root is clean — earlier stray duplicates (`types.py`, `engine.py`,
 ## Running it
 
 ```bash
-python -m cli.main scan example.com                 # deterministic, no AI/DB
-python -m cli.main scan example.com --passive       # + passive modules
-python -m cli.main scan example.com --full          # all modules
+python -m cli.main scan example.com                 # deterministic, no AI/DB (active ceiling, default modules)
+python -m cli.main scan example.com --mode osint    # PASSIVE ONLY — technically unable to probe the target
+python -m cli.main scan example.com --mode active   # passive + full active recon + non-intrusive vuln checks
+python -m cli.main scan example.com --mode vuln     # minimal discovery + vulnerability assessment
+python -m cli.main scan example.com --mode full     # complete authorized pipeline
+python -m cli.main scan example.com --mode full --intrusive   # + intrusive tier (explicit authorization)
+python -m cli.main scan example.com --passive       # (legacy) + passive modules
+python -m cli.main scan example.com --full          # (legacy; = --mode full) all modules
 python -m cli.main scan example.com -p fast         # a profile
 python -m cli.main scan example.com -m crt_sh -m dnsx   # explicit modules (replaces defaults)
 python -m cli.main scan example.com -r 5 -c 20      # 5 req/s per bucket, max 20 concurrent ops
@@ -229,6 +339,8 @@ python -m cli.main diff <scan_a> <scan_b> --db-url ...
 python -m cli.main wordlist stats --db-url ...                          # KB size per category/scope
 python -m cli.main wordlist export directories --db-url ... [--scope technology --scope-key wordpress] [--min-confidence 0.6] [-O dirs.txt]
 python -m cli.main triage <scan_id> --db-url ...
+python -m cli.main report <domain|scan_id> --db-url ...          # vulnerability report (text)
+python -m cli.main report <domain|scan_id> --db-url ... --json -O report.json   # structured JSON
 ```
 `--ai`/`--agent` need `ANTHROPIC_API_KEY` + `--db-url`. Default AI model string
 in code is `claude-sonnet-4-6`. Scope defaults to `[*.domain, domain]` if
