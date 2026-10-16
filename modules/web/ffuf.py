@@ -88,7 +88,7 @@ class FfufModule(BaseModule):
         "threads": 40,                  # ffuf -t
         "rate": 0,                      # ffuf -rate (0 = derive from limiter, else unlimited)
         "req_timeout": 10,              # ffuf per-request -timeout (seconds)
-        "run_timeout": 600,             # overall ffuf subprocess timeout
+        "run_timeout": 600,             # ffuf -maxtime: stop + write partial results after N s
         "max_results": 1000,            # cap emitted URLs per service
         "recursion": False,             # ffuf -recursion
         "recursion_depth": 1,
@@ -181,6 +181,7 @@ class FfufModule(BaseModule):
         out_fd, out_path = tempfile.mkstemp(suffix=".json", prefix="ffuf_")
         os.close(out_fd)
         try:
+            run_to = max(1, int(self.opt("run_timeout")))
             cmd = build_command(
                 target_url=base,
                 wordlist=wordlist,
@@ -192,12 +193,17 @@ class FfufModule(BaseModule):
                 threads=int(self.opt("threads")),
                 rate=self._derived_rate(),
                 timeout=int(self.opt("req_timeout")),
+                # ffuf self-terminates at -maxtime and writes partial JSON; a flat
+                # subprocess kill would lose everything (ffuf only writes on exit).
+                max_time=run_to,
                 user_agent=str(self.opt("user_agent")),
                 recursion=bool(self.opt("recursion")),
                 recursion_depth=int(self.opt("recursion_depth")),
             )
+            # Hard backstop sits *above* -maxtime so ffuf has a grace window to
+            # flush its results file before we'd ever kill it.
             ok = await FfufWrapper(
-                timeout=int(self.opt("run_timeout")), limiter=self.rate_limiter
+                timeout=run_to + 30, limiter=self.rate_limiter
             ).run(cmd, bucket=f"ffuf:{parsed.hostname or base}")
             if not ok:
                 return

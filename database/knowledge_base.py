@@ -62,8 +62,10 @@ class KnowledgeBase:
         self._session = session
         # A single AsyncSession is not safe for concurrent use. The bus fans out
         # events to handlers as parallel tasks, so wordlist_learner may call
-        # learn() concurrently — serialize every write through this lock (same
-        # discipline as database.persister.Persister).
+        # learn() while extfuzz calls generate_wordlist() — *both* touch this one
+        # session. Serialize EVERY session access (reads and writes alike) through
+        # this lock; a read racing a write otherwise raises "concurrent operations
+        # are not permitted". Same discipline as database.persister.Persister.
         self._lock = asyncio.Lock()
 
     # ── learning ────────────────────────────────────────────────────────────
@@ -185,13 +187,14 @@ class KnowledgeBase:
         This is *not* the whole global KB dumped to a file — it is a ranked,
         filtered selection. The resulting words are candidates for probing, never
         assertions that any of them exist."""
-        rows = await self._repo.list_items(
-            scope_type, scope_key, category,
-            min_target_count=min_target_count,
-            min_occurrence=min_occurrence,
-            min_confidence=min_confidence,
-            limit=limit,
-        )
+        async with self._lock:
+            rows = await self._repo.list_items(
+                scope_type, scope_key, category,
+                min_target_count=min_target_count,
+                min_occurrence=min_occurrence,
+                min_confidence=min_confidence,
+                limit=limit,
+            )
         return [r.value for r in rows]
 
     async def export_to_file(self, category: str, path: str, **kwargs) -> int:
@@ -207,4 +210,5 @@ class KnowledgeBase:
     async def stats(
         self, scope_type: str | None = None, scope_key: str | None = None
     ) -> dict:
-        return await self._repo.stats(scope_type, scope_key)
+        async with self._lock:
+            return await self._repo.stats(scope_type, scope_key)
