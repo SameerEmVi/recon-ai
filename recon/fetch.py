@@ -63,6 +63,10 @@ class FetchResult:
     ok: bool = False
     error: str | None = None
     size_kb: float | None = None   # real body size (KB) on any response, for per-caller caps
+    # Each Set-Cookie header kept separately. `headers` is a plain mapping, and
+    # httpx merges repeated headers into one comma-joined value there — which
+    # lets one hardened cookie's flags mask another cookie that lacks them.
+    set_cookies: tuple[str, ...] = ()
 
     @property
     def is_2xx(self) -> bool:
@@ -84,8 +88,12 @@ class ResponseCache:
         self.misses = 0
 
     @staticmethod
-    def key(url: str, method: str = "GET") -> str:
-        return f"{method.upper()} {url}"
+    def key(url: str, method: str = "GET", *, follow_redirects: bool = True) -> str:
+        # A followed and a non-followed GET of the same URL are different
+        # responses (final page vs. the 3xx itself), so they must not share an
+        # entry — otherwise whichever module fetched first decides for the rest.
+        suffix = "" if follow_redirects else " [no-redirect]"
+        return f"{method.upper()} {url}{suffix}"
 
     async def get_or_fetch(
         self, key: str, fetcher: Callable[[], Awaitable[FetchResult]]

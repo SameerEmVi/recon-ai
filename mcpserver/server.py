@@ -55,6 +55,11 @@ from mcpserver.context import (
 
 log = logging.getLogger(__name__)
 
+# Background scan tasks. The event loop holds only a weak reference to a bare
+# create_task(), so a running scan could be garbage-collected mid-flight; keep a
+# strong reference until each task finishes (same pattern as EventBus._tasks).
+_scan_tasks: set[asyncio.Task] = set()
+
 mcp = FastMCP(
     "recon-ai",
     instructions=(
@@ -150,7 +155,7 @@ async def _run_scan_bg(
             enabled = CapabilityPolicy(mode).default_module_names(ModuleRegistry.get)
         controller = ScanController(
             scope,
-            mode=mode or "active",
+            mode=mode or "osint",
             ai_enabled=ai,
             agent_enabled=agent,
             enabled_modules=enabled,
@@ -184,7 +189,7 @@ async def start_scan(
     ai_model: str = "claude-sonnet-4-6",
     rate_limit: float | None = None,
     max_concurrency: int | None = None,
-    mode: str = "active",
+    mode: str = "osint",
 ) -> dict:
     """
     Start a reconnaissance scan against an authorized domain.
@@ -209,10 +214,12 @@ async def start_scan(
                     backoff still applies if the target starts blocking).
     max_concurrency Max simultaneous recon operations. None = unlimited.
     mode            Execution mode / capability ceiling, enforced centrally:
-                    "osint" (passive only — no target probing), "vuln" (minimal
-                    discovery + vulnerability assessment), "active" (default — full
-                    active recon + non-intrusive checks), "full". The mode cannot
-                    be exceeded by any module or agent action.
+                    "osint" (DEFAULT — passive only, no target probing; safe for
+                    an unattended external caller), "vuln" (minimal discovery +
+                    vulnerability assessment), "active" (full active recon +
+                    non-intrusive checks), "full". Callers that want the target
+                    actively probed must opt in by passing an explicit mode. The
+                    mode cannot be exceeded by any module or agent action.
 
     IMPORTANT: Only scan domains you are explicitly authorized to test.
     """
@@ -222,6 +229,23 @@ async def start_scan(
     effective_db_url = _resolve_db_url(db_url)
     resolved_in = list(in_scope) if in_scope else [f"*.{domain}", domain]
     resolved_out = list(out_scope) if out_scope else []
+
+    # Fail closed up front: the seed must be IN scope (deny-first), exactly as
+    # the controller re-checks before running. Report it to the caller instead
+    # of starting a background scan that would only fail.
+    from scope.engine import ScopeEngine
+    from scope.types import Scope, ScopeStatus
+    try:
+        _scope = Scope.from_strings(
+            in_scope=resolved_in, out_scope=resolved_out,
+            max_distance=max_distance, wildcard_includes_apex=wildcard_apex,
+        )
+    except ValueError as exc:
+        return {"error": f"invalid scope rule: {exc}"}
+    seed_decision = ScopeEngine(_scope).evaluate(domain)
+    if seed_decision.status is not ScopeStatus.IN:
+        return {"error": f"seed {domain!r} is not in scope: {seed_decision.reason}"}
+
     ai_effective = ai or agent
     api_key = get_api_key() if ai_effective else None
 
@@ -231,7 +255,7 @@ async def start_scan(
     scan_id = str(_uuid.uuid4())
     register_scan(scan_id, domain)
 
-    asyncio.create_task(
+    task = asyncio.create_task(
         _run_scan_bg(
             scan_id=scan_id,
             domain=domain,
@@ -250,6 +274,8 @@ async def start_scan(
             mode=mode,
         )
     )
+    _scan_tasks.add(task)
+    task.add_done_callback(_scan_tasks.discard)
 
     return {
         "scan_id": scan_id,

@@ -259,3 +259,76 @@ def test_unclassified_module_fail_closed_except_full():
 def test_explicit_classvar_overrides_table():
     # subfinder is flagged "active" but declares PASSIVE_EXTERNAL → allowed in osint.
     assert CapabilityPolicy("osint").module_allowed(_cls("subfinder"))[0] is True
+
+
+# ── 7. own-client modules re-check capability at call time ────────────────────
+# metascan/corscanner/csprecon/takeover/ffuf keep their own network client
+# (bytes, custom headers, raw DNS) instead of BaseModule.fetch, so they must
+# perform the same call-time mode recheck fetch()/run_proc() do — not rely on
+# the module-load filter alone. Proof the own-client paths degrade gracefully.
+
+def test_capability_ok_helper_reflects_mode():
+    from modules.web.metascan import MetaScanModule
+    osint = MetaScanModule(SimpleNamespace(policy=CapabilityPolicy("osint"),
+                                           scan_id=uuid.uuid4(), name="metascan"))
+    active = MetaScanModule(SimpleNamespace(policy=CapabilityPolicy("active"),
+                                            scan_id=uuid.uuid4(), name="metascan"))
+    assert osint.capability_ok(CAP_TARGET_HTTP_REQUEST) is False
+    assert active.capability_ok(CAP_TARGET_HTTP_REQUEST) is True
+
+
+async def test_takeover_resolve_and_fetch_denied_in_osint():
+    from modules.web.takeover import TakeoverModule
+    ctrl = SimpleNamespace(policy=CapabilityPolicy("osint"), scan_id=uuid.uuid4(), name="takeover")
+    m = TakeoverModule(ctrl)
+    assert await m._target_resolves("gone.cloudfront.net") is None
+    assert await m._fetch_body("assets.example.com") == (None, None)
+
+
+async def test_metascan_download_denied_in_osint():
+    from modules.web.metascan import MetaScanModule
+    ctrl = SimpleNamespace(policy=CapabilityPolicy("osint"), scan_id=uuid.uuid4(), name="metascan")
+    m = MetaScanModule(ctrl)
+    assert await m._download("https://target.example/report.pdf") is None
+
+
+async def test_csprecon_fetch_denied_in_osint():
+    from modules.web.csprecon import CspReconModule
+    ctrl = SimpleNamespace(policy=CapabilityPolicy("osint"), scan_id=uuid.uuid4(), name="csprecon")
+    m = CspReconModule(ctrl)
+    assert await m._fetch_csp("https://target.example/") == []
+
+
+# ── 8. end-of-scan event-persistence flush ────────────────────────────────────
+# stamp_and_publish fires save_event as a tracked background task; _flush_persist
+# must await those in-flight writes before the scan marks itself complete, so
+# end-of-scan events are persisted instead of racing teardown.
+
+async def test_flush_persist_awaits_inflight_saves():
+    import asyncio
+    from controller.controller import ScanController
+    from events.types import Event, EventType, SubdomainData
+    from scope.types import Scope
+
+    saved: list[str] = []
+    release = asyncio.Event()
+
+    class _FakePersister:
+        async def save_event(self, event):
+            await release.wait()           # stay in-flight until released
+            saved.append(event.data.hostname)
+
+    scope = Scope.from_strings(in_scope=["x.com", "*.x.com"], out_scope=[], max_distance=5)
+    ctrl = ScanController(scope, mode="active", results_enabled=False, live=False)
+    ctrl._persister = _FakePersister()
+
+    ev = Event.create(EventType.SUBDOMAIN, SubdomainData(hostname="api.x.com", source="t"),
+                      scan_job_id=ctrl.scan_id, source_tool="t", distance=1)
+    assert await ctrl.stamp_and_publish(ev) is True
+    # The save task is tracked (strong ref held) and still in-flight.
+    assert ctrl._persist_tasks and not saved
+
+    release.set()
+    await ctrl._flush_persist()
+    assert saved == ["api.x.com"]          # flush waited for the blocked write
+    assert all(t.done() for t in ctrl._persist_tasks)

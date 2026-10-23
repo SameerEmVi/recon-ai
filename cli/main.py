@@ -26,7 +26,7 @@ import uuid
 
 import typer
 
-from scope.types import Scope
+from scope.types import Scope, ScopeStatus
 
 app = typer.Typer(
     name="recon-ai",
@@ -264,6 +264,14 @@ def scan(
         )
     except ValueError as exc:
         typer.echo(f"[error] invalid scope rule: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    # Fail closed before any setup: the seed gets the same deny-first gate as
+    # every other target (the controller re-checks this in run()).
+    from scope.engine import ScopeEngine
+    seed_decision = ScopeEngine(scope).evaluate(domain)
+    if seed_decision.status is not ScopeStatus.IN:
+        typer.echo(f"[error] seed {domain!r} is not in scope: {seed_decision.reason}", err=True)
         raise typer.Exit(code=1)
 
     ai_effective = ai or agent

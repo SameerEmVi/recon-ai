@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class SeedOutOfScope(ValueError):
+    """The requested seed domain is not IN scope — the scan must not start."""
+
+
 class ScanController:
     def __init__(
         self,
@@ -71,6 +75,12 @@ class ScanController:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
         self._bus = EventBus()
+        # Fire-and-forget event-persistence tasks. We keep strong references so
+        # (a) the GC can't drop a running task mid-write (CPython's loop holds
+        # only a weak ref to a bare create_task), and (b) _flush_persist() can
+        # await the whole set before we mark the scan complete, so end-of-scan
+        # writes land instead of racing teardown. Mirrors EventBus._tasks.
+        self._persist_tasks: set[asyncio.Task] = set()
         self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
@@ -145,9 +155,27 @@ class ScanController:
                 print(ui.event_line(event))
             self._collect_for_summary(event)
             if self._persister is not None:
-                asyncio.create_task(self._persister.save_event(event))
+                task = asyncio.create_task(self._persister.save_event(event))
+                self._persist_tasks.add(task)
+                task.add_done_callback(self._persist_tasks.discard)
 
         return accepted
+
+    async def _flush_persist(self) -> None:
+        """Await all in-flight event-persistence tasks.
+
+        save_event() is fired as a background task per accepted event so the
+        scan pipeline never blocks on the DB. This waits for whatever is still
+        pending so the final writes land before the session is torn down.
+        A persist task settling may spawn no further persist work, so a single
+        drain of the current set is sufficient; we snapshot to avoid mutating
+        the set while gathering (the done-callback discards from it).
+        """
+        while self._persist_tasks:
+            pending = [t for t in self._persist_tasks if not t.done()]
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # -- end-of-scan summary ------------------------------------------------
 
@@ -262,7 +290,23 @@ class ScanController:
                                  + ui.paint("  (use --db-url to inspect)", "grey", dim=True)))
         print(ui.rule("", fg="bcyan"))
 
+    def check_seed(self, seed_domain: str):
+        """Scope-evaluate the seed domain. Returns the ScopeDecision.
+
+        The seed is the authorized starting point, but it is still a target:
+        it must pass the same deny-first gate as every other candidate, so an
+        out-scope rule or an in-scope list that doesn't cover it is honoured.
+        """
+        return self._scope_engine.evaluate(seed_domain)
+
     async def run(self, seed_domain: str) -> None:
+        # Fail closed before ANY action (DB, seed modules, probing): the seed
+        # gets the same deny-first evaluation as every other candidate.
+        decision = self.check_seed(seed_domain)
+        if decision.status is not ScopeStatus.IN:
+            raise SeedOutOfScope(
+                f"seed {seed_domain!r} is not in scope ({decision.reason}) — refusing to scan"
+            )
         self._scan_domain = seed_domain
         mode = "B — AI-assisted" if self._ai_enabled else "A — deterministic"
         log.info("scan %s | mode %s | seed %s", self._scan_id, mode, seed_domain)
@@ -276,15 +320,24 @@ class ScanController:
         if self._db_url:
             await self._init_db()
 
+        failed = False
         try:
             await self._do_run(seed_domain)
-        except Exception:
-            if self._persister:
-                await self._persister.scan_fail(self._scan_id)
+        except BaseException:
+            # BaseException so a cancelled/interrupted scan is not recorded as
+            # complete either.
+            failed = True
             raise
         finally:
             if self._persister:
-                await self._persister.scan_end(self._scan_id, self._bus.seen_count)
+                # Drain in-flight event writes before recording the outcome, so
+                # end-of-scan emissions (vulnassess/cloud_intel at finish()) are
+                # persisted rather than cut off by teardown.
+                await self._flush_persist()
+                if failed:
+                    await self._persister.scan_fail(self._scan_id)
+                else:
+                    await self._persister.scan_end(self._scan_id, self._bus.seen_count)
 
         self.print_summary()
         from cli import ui

@@ -163,6 +163,13 @@ class FfufModule(BaseModule):
             self._log.warning("ffuf: no wordlist found — skipping")
             return
 
+        # Calibration probes hit the target directly with our own client, so
+        # recheck the mode policy here too (run_proc re-checks the ffuf binary
+        # run separately). Defence-in-depth on top of module-load filtering.
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="ffuf calibration"):
+            return
+
         try:
             import httpx
         except ImportError:

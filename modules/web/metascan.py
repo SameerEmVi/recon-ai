@@ -216,6 +216,9 @@ class MetaScanModule(BaseModule):
     # ── download / extract ─────────────────────────────────────────────────────
 
     async def _download(self, url: str) -> bytes | None:
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="metadata download"):
+            return None
         try:
             import httpx
         except ImportError:

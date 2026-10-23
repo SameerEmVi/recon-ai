@@ -296,6 +296,9 @@ class TakeoverModule(BaseModule):
         name = (target or "").strip().rstrip(".")
         if not name:
             return None
+        from policy import CAP_TARGET_DNS_QUERY
+        if not self.capability_ok(CAP_TARGET_DNS_QUERY, action="CNAME-target resolve"):
+            return None
         loop = asyncio.get_running_loop()
         nxdomain_seen = False
         # Two attempts: a single transient failure must not read as "dangling".
@@ -318,6 +321,9 @@ class TakeoverModule(BaseModule):
     async def _fetch_body(self, host: str) -> tuple[int | None, str | None]:
         """GET the host (https then http) through the shared limiter; return
         (status, body|None). (None, None) on total failure. Never raises."""
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="takeover HTTP verify"):
+            return None, None
         try:
             import httpx
         except ImportError:

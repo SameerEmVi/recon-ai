@@ -32,6 +32,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _set_cookie_list(headers: Any) -> tuple[str, ...]:
+    """Each Set-Cookie header separately (httpx merges them in a plain dict).
+
+    Falls back to the single (possibly merged) value for header objects without
+    `get_list` — e.g. a plain mapping from a mocked response.
+    """
+    get_list = getattr(headers, "get_list", None)
+    if callable(get_list):
+        return tuple(get_list("set-cookie"))
+    try:
+        value = headers.get("set-cookie")
+    except Exception:
+        return ()
+    return (value,) if value else ()
+
+
 class BaseModule(ABC):
     # ── class-level declarations (set by each subclass) ───────────────────────
 
@@ -177,6 +193,26 @@ class BaseModule(ABC):
         """
         return self.rate_limiter.guard(bucket or f"mod:{self.name}")
 
+    def capability_ok(self, capability: str, *, action: str = "") -> bool:
+        """Call-time capability gate for modules that bypass `fetch`/`run_proc`.
+
+        `fetch()` and `run_proc()` already re-check the mode policy at the moment
+        of action (defence-in-depth on top of module-load filtering). Modules
+        that keep their own network client — because they need bytes, custom
+        headers, or a raw DNS lookup rather than the shared text cache — must get
+        the same recheck instead of relying on the load filter alone. Returns
+        True when the action is permitted; logs and returns False when the mode
+        forbids it (never raises, so a denied probe degrades gracefully).
+        Under a mock controller the policy is ALLOW_ALL, so this is a no-op.
+        """
+        from policy import CapabilityDenied
+        try:
+            self.policy.check(capability, who=f"module '{self.name}'{' ' + action if action else ''}")
+            return True
+        except CapabilityDenied as exc:
+            self._log.warning("%s denied by mode policy: %s", action or capability, exc)
+            return False
+
     def inspect_response(self, resp: Any, *, body: str | None = None):
         """Feed an httpx response to WAF detection; auto-slows on block/challenge.
 
@@ -262,6 +298,7 @@ class BaseModule(ABC):
                         content_type=ctype,
                         ok=True,
                         size_kb=size_kb,
+                        set_cookies=_set_cookie_list(r.headers),
                     )
             except Exception as exc:
                 self._log.debug("fetch failed for %s: %s", url, exc)
@@ -277,7 +314,8 @@ class BaseModule(ABC):
         cache = get_response_cache(self._ctrl)
         if cache is None:  # mock controller / cache disabled → direct, uncached
             return _apply_cap(await _do_fetch())
-        return _apply_cap(await cache.get_or_fetch(ResponseCache.key(url), _do_fetch))
+        key = ResponseCache.key(url, follow_redirects=follow_redirects)
+        return _apply_cap(await cache.get_or_fetch(key, _do_fetch))
 
     async def run_proc(
         self, cmd: list[str], *, timeout: int = 60, bucket: str | None = None,

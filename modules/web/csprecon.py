@@ -107,6 +107,9 @@ class CspReconModule(BaseModule):
 
     async def _fetch_csp(self, url: str) -> list[str]:
         """Return the CSP header value(s) plus any CSP <meta> from the body."""
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="CSP fetch"):
+            return []
         try:
             import httpx
         except ImportError:

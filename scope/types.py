@@ -178,6 +178,13 @@ def _normalize_domain(domain: str) -> str:
     d = domain.strip().lower().rstrip(".")
     if not d:
         return ""
+    # Only attempt IDNA on names that actually contain non-ASCII. A pure-ASCII
+    # name is already in comparison form, and the "idna" codec rejects perfectly
+    # valid DNS labels that carry an underscore (e.g. _dmarc, _domainkey,
+    # _acme-challenge) — encoding those would drop them. Skipping ASCII names
+    # keeps underscore hosts intact while still folding unicode → punycode.
+    if d.isascii():
+        return d
     try:
         # encode each label to punycode; "idna" codec handles the whole name
         d = d.encode("idna").decode("ascii")
