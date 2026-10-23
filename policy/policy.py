@@ -130,6 +130,7 @@ MODULE_CAPABILITIES: dict[str, frozenset[str]] = {
 
     # port scanning
     "naabu": frozenset({CAP_PORT_SCANNING}),
+    "rustscan": frozenset({CAP_PORT_SCANNING}),
     "nmap": frozenset({CAP_PORT_SCANNING}),
 
     # vulnerability assessment (non-intrusive)

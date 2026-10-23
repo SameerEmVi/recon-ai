@@ -217,3 +217,38 @@ def test_planner_does_not_mutate_event_scope():
 def test_bad_mode_rejected():
     with pytest.raises(ValueError):
         PlannerConfig(mode="turbo")
+
+
+# ── port scanners must not be auto-skipped (regression) ──────────────────────
+# The port scanner carries the "slow" flag → cost HIGH(8); with only the default
+# value MEDIUM(3) the score is -5, below min_value(0), so the planner silently
+# skipped naabu/rustscan and no OPEN_PORT ever fired. Their explicit
+# expected_value=HIGH must keep them running at the default threshold.
+
+def _ip_event(addr="10.0.0.5"):
+    from events.types import IpData
+    return Event.create(EventType.IP, IpData(address=addr),
+                        scan_job_id=SCAN, source_tool="dnsx")
+
+
+@pytest.mark.parametrize("name", ["naabu", "rustscan", "nmap"])
+def test_port_scanner_not_skipped_at_default_threshold(name):
+    from modules.registry import ModuleRegistry
+    ModuleRegistry.discover()
+    cls = ModuleRegistry.get(name)
+    assert cls is not None
+    planner = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
+    ev = _ip_event()
+    planner.observe(ev)
+    dec = planner.evaluate(cls, ev)
+    assert dec.run, f"{name} was skipped: {dec.reason}"
+
+
+def test_slow_high_value_module_runs_but_default_value_slow_is_skipped():
+    # Documents the exact scoring: HIGH value cancels HIGH cost (score 0 ≥ 0),
+    # while the old MEDIUM-value slow module would score -5 and be dropped.
+    planner = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
+    ev = _ip_event()
+    planner.observe(ev)
+    assert planner.evaluate(mod("good", flags=["slow", "active"], value=VALUE_HIGH), ev).run
+    assert not planner.evaluate(mod("bad", flags=["slow", "active"]), ev).run

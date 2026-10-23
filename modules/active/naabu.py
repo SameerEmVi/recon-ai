@@ -33,11 +33,32 @@ class NaabuModule(BaseModule):
     watched_events = ["IP"]
     produced_events = ["OPEN_PORT"]
     flags = ["active", "port-scan", "slow"]
+    # Port discovery is high-value recon. Without this the planner derives
+    # value=MEDIUM(3) and (via the "slow" flag) cost=HIGH(8) → score -5, which is
+    # below the default min_value(0), so the port scanner was being silently
+    # skipped. HIGH value makes the score net-neutral so it runs by default.
+    expected_value = 8
     options = {
-        "ports": "top-1000",   # "top-100", "top-1000", or comma-separated like "80,443,8080"
+        "ports": "top-1000",   # "top-100", "top-1000", "full", or "80,443,8080"
         "timeout": 120,
+        # naabu's own default is CONNECT ("c"); SYN ("s") needs raw sockets
+        # (Npcap + admin on Windows). Keep connect so it works unprivileged.
+        "scan_type": "connect",   # "connect" | "syn"
     }
     deps_binary = ["naabu"]
+
+    def _port_flags(self) -> list[str]:
+        ports_arg = str(self.opt("ports") or "top-1000")
+        if ports_arg == "top-1000":
+            return ["-top-ports", "1000"]
+        if ports_arg == "top-100":
+            return ["-top-ports", "100"]
+        if ports_arg == "full":
+            return ["-p", "-"]   # naabu: full 1-65535
+        return ["-p", ports_arg]
+
+    def _scan_flag(self) -> str:
+        return "s" if str(self.opt("scan_type") or "connect").lower() in ("s", "syn") else "c"
 
     async def handle_event(self, event: Event) -> None:
         global _NOT_FOUND_WARNED
@@ -49,17 +70,14 @@ class NaabuModule(BaseModule):
             return
 
         host = event.data.address
-        ports_arg = self.opt("ports")
+        # Arg-injection guard: a target that could parse as a naabu flag must
+        # never reach the binary (hostnames/IPs come from target-controlled DNS).
+        if not host or host.startswith("-"):
+            self._log.warning("naabu: refusing suspicious target %r", host)
+            return
 
-        # naabu flag: -top-ports 1000, or -p 80,443,8080
-        if ports_arg == "top-1000":
-            port_flags = ["-top-ports", "1000"]
-        elif ports_arg == "top-100":
-            port_flags = ["-top-ports", "100"]
-        else:
-            port_flags = ["-p", str(ports_arg)]
-
-        cmd = ["naabu", "-host", host, "-silent", "-json"] + port_flags
+        cmd = (["naabu", "-host", host, "-silent", "-json", "-s", self._scan_flag()]
+               + self._port_flags())
         self._log.debug("exec: %s", " ".join(cmd))
 
         try:

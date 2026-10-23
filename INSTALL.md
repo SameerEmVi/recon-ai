@@ -17,6 +17,7 @@ external recon binaries, database, and AI configuration.
 | **git** | cloning | |
 | **Go ≥ 1.21** | building the recon binaries | only if you want active recon (subfinder, dnsx, httpx, …) |
 | **Npcap** (Windows) | `naabu` SYN port scans | [npcap.com](https://npcap.com) — optional |
+| **RustScan** | `-m rustscan` port discovery (opt-in alternative to naabu) | [bee-san/RustScan](https://github.com/bee-san/RustScan) — optional |
 | **ANTHROPIC_API_KEY** | `--ai` / `--agent` | optional; everything works without it |
 
 Recon-AI runs fully in **deterministic mode with zero external binaries** — the
@@ -96,6 +97,33 @@ go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/ffuf/ffuf/v2@latest
 ```
+
+### Optional: RustScan (alternative port scanner)
+
+RustScan is an **opt-in** alternative to naabu for port discovery (select it with
+`-m rustscan`). naabu stays the default; if RustScan is absent the module
+warn-and-skips. Install any one of:
+
+```bash
+cargo install rustscan                 # from source (Rust toolchain)
+# or a prebuilt release: https://github.com/bee-san/RustScan/releases
+# or Docker:  docker run -it --rm rustscan/rustscan:latest
+```
+
+Recon-AI runs RustScan in greppable mode with scripts disabled, so it only
+reports open ports — the existing `nmap` module (if enabled) performs the
+`-sV` service/version follow-up on discovered ports. Port scanning requires
+`--mode active` or `--mode full` and an in-scope IP/CIDR (resolved IPs are OUT
+under a domain-only scope — add `--in-scope <ip/CIDR>`). Example:
+
+```bash
+python -m cli.main scan example.com --mode active \
+  --in-scope 203.0.113.10 -m subfinder -m dnsx -m rustscan -m nmap
+```
+
+Tunable options (via `-m rustscan` module config): `ports` (`top-1000` | `full`
+| `80,443,8080`), `batch_size` (default 1500), `timeout_ms` (2000), `tries`,
+`ulimit`, `scan_order` (`serial` | `random`), `exclude_ports`.
 
 Directory/content discovery uses the **ffuf** binary (the `ffuf` module). It is
 **required** for content discovery — install it with the `go install` above.

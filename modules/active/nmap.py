@@ -26,6 +26,10 @@ class NmapModule(BaseModule):
     watched_events = ["OPEN_PORT"]
     produced_events = ["TECHNOLOGY"]
     flags = ["active", "port-scan", "service-detection", "slow"]
+    # Service/version detection on an already-discovered open port is high value;
+    # without this the planner (value MEDIUM, cost HIGH via "slow") scores it -5
+    # and skips the follow-up. HIGH value keeps the combo intact.
+    expected_value = 8
     options = {
         "timeout": 180,
         # Opt-in NSE scripts (e.g. "default,safe" or "banner"). Off by default.

@@ -76,7 +76,9 @@ pip install -e ".[sqlite,ai,mcp,dev]"
 
 External binaries are optional per module (modules warn-and-skip if a binary is
 missing). Commonly used: subfinder, dnsx, httpx (ProjectDiscovery), naabu,
-katana, nuclei, ffuf. Directory/content discovery uses the **ffuf** binary
+katana, nuclei, ffuf. Port scanning uses **naabu** by default; **RustScan** is
+an opt-in alternative (`-m rustscan`, active/full modes only — see INSTALL.md).
+Directory/content discovery uses the **ffuf** binary
 (the `ffuf` module), which is required for content discovery. The pure-Python
 **extfuzz** module complements it (no binary): it fuzzes file extensions on
 already-discovered paths (`app.js` → `app.js.map`/`.bak`, `download.php` →
