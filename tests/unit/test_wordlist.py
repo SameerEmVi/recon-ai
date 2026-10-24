@@ -270,3 +270,36 @@ async def test_stats_by_category_and_scope(session):
     assert stats["by_category"].get(DIRECTORIES, 0) >= 1
     assert stats["by_category"].get(FILES, 0) >= 1
     assert stats["by_scope"].get(SCOPE_GLOBAL, 0) >= 2
+
+
+async def test_concurrent_reads_and_writes_do_not_race(session):
+    """Regression: wordlist_learner (learn) and extfuzz (generate_wordlist) both
+    hit the KB's single AsyncSession. Reads must be serialized under the same
+    lock as writes, or SQLAlchemy raises 'concurrent operations are not
+    permitted'. Fan out a mix of reads and writes at once and require it clean."""
+    import asyncio
+
+    kb = KnowledgeBase(session)
+    # seed one row so reads have something to return
+    await kb.learn(Candidate("admin", DIRECTORIES), scan_domain="seed.com")
+
+    async def writer(i: int):
+        await kb.learn_many(
+            [Candidate(f"dir{i}", DIRECTORIES), Candidate(f"file{i}.json", FILES)],
+            scan_domain=f"t{i}.com",
+        )
+
+    async def reader():
+        await kb.generate_wordlist(DIRECTORIES)
+        await kb.stats()
+
+    tasks = []
+    for i in range(12):
+        tasks.append(writer(i))
+        tasks.append(reader())
+    # No exception == the session was never used concurrently.
+    await asyncio.gather(*tasks)
+
+    # And the writes actually landed.
+    dirs = await kb.generate_wordlist(DIRECTORIES)
+    assert "admin" in dirs and any(d.startswith("dir") for d in dirs)

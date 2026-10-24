@@ -216,12 +216,15 @@ class MetaScanModule(BaseModule):
     # ── download / extract ─────────────────────────────────────────────────────
 
     async def _download(self, url: str) -> bytes | None:
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="metadata download"):
+            return None
         try:
             import httpx
         except ImportError:
             return None
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{urlparse(url).hostname or url}"):
                     r = await client.get(url, follow_redirects=True)
                 self.inspect_response(r)

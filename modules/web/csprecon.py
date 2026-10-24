@@ -107,13 +107,16 @@ class CspReconModule(BaseModule):
 
     async def _fetch_csp(self, url: str) -> list[str]:
         """Return the CSP header value(s) plus any CSP <meta> from the body."""
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="CSP fetch"):
+            return []
         try:
             import httpx
         except ImportError:
             self._log.warning("httpx not installed")
             return []
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{urlparse(url).hostname or url}"):
                     r = await client.get(url, follow_redirects=True)
                 self.inspect_response(r)

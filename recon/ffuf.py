@@ -176,12 +176,20 @@ def build_command(
     threads: int = 40,
     rate: int = 0,
     timeout: int = 10,
+    max_time: int = 0,
     user_agent: str = "recon-ai/ffuf",
     recursion: bool = False,
     recursion_depth: int = 0,
+    proxy: str | None = None,
     binary: str = "ffuf",
 ) -> list[str]:
-    """Build a fully-formed ffuf argv. Pure — no side effects (unit-tested)."""
+    """Build a fully-formed ffuf argv. Pure — no side effects (unit-tested).
+
+    ``max_time`` (seconds, 0 = unbounded) maps to ffuf ``-maxtime``: ffuf stops
+    fuzzing when it elapses and **still writes its JSON output** with whatever it
+    found so far. This is what keeps a big wordlist × low rate from producing
+    *nothing* — without it, the subprocess timeout kills ffuf before it writes.
+    """
     if "FUZZ" not in target_url:
         target_url = target_url.rstrip("/") + "/FUZZ"
 
@@ -194,10 +202,12 @@ def build_command(
         "-rate", str(rate),
         "-timeout", str(timeout),
         "-H", f"User-Agent: {user_agent}",
+        *(["-maxtime", str(max_time)] if max_time and max_time > 0 else []),
         "-o", output_file,
         "-of", "json",
         "-s",                # silent: no live progress on stdout
         "-noninteractive",   # never prompt
+        *(["-x", proxy] if proxy else []),   # ffuf's proxy flag → route via Burp
     ]
 
     exts = [e for e in (extensions or []) if e]
@@ -274,12 +284,14 @@ class FfufWrapper:
         clean completion, False on missing binary / timeout / launch error."""
         global _NOT_FOUND_WARNED
         log.debug("[ffuf] %s", " ".join(cmd))
+        from recon.proc import communicate, new_session_kwargs
         async with self._limiter.guard(bucket):
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **new_session_kwargs(),
                 )
             except FileNotFoundError:
                 if not _NOT_FOUND_WARNED:
@@ -287,12 +299,10 @@ class FfufWrapper:
                     _NOT_FOUND_WARNED = True
                 return False
             try:
-                _, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout
-                )
+                _, stderr = await communicate(proc, timeout=self._timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                log.warning("[ffuf] timed out after %ds", self._timeout)
+                # communicate() already killed the ffuf process tree + reaped.
+                log.warning("[ffuf] timed out after %ds — process tree killed", self._timeout)
                 return False
         if proc.returncode not in (0, None):
             log.debug("[ffuf] exit %s: %s", proc.returncode,

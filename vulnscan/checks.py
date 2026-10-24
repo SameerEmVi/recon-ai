@@ -45,6 +45,26 @@ _DIAG_KW = ("/health", "/healthz", "/status", "/env", "/actuator/env", "/actuato
             "/debug/vars", "/jolokia")
 _REACHABLE = frozenset({200, 201, 204, 301, 302, 307, 308, 401, 403})
 
+# Static-asset extensions: an "admin" dir inside a JS/CSS asset path is not an
+# interface (e.g. /themes/x/core/admin/js/common.js), so these are never a hit.
+_STATIC_EXT = (".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+               ".ico", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".webp")
+
+
+def _kw_hit(path: str, keywords) -> bool:
+    """Match a keyword against a URL path on token boundaries, not as a bare
+    substring — so 'manage' does not match '/services/managed-...'. A keyword
+    containing '/' or '-' is specific enough to match literally; a bare word
+    must sit on non-alphanumeric boundaries (start/end or a delimiter)."""
+    import re as _re
+    for kw in keywords:
+        if "/" in kw or "-" in kw:
+            if kw in path:
+                return True
+        elif _re.search(r"(?<![a-z0-9])" + _re.escape(kw) + r"(?![a-z0-9])", path):
+            return True
+    return False
+
 
 # ── context ───────────────────────────────────────────────────────────────────
 
@@ -385,12 +405,16 @@ class ExposedInterfaceCheck(Check):
         candidates = ctx.urls | {s["url"] for s in ctx.services if s.get("url")}
         for url in candidates:
             path = urlparse(url).path.lower()
+            # A static asset is never an interface, even if an 'admin' dir is in
+            # its path (e.g. a theme's .../admin/js/common.js).
+            if path.endswith(_STATIC_EXT):
+                continue
             kind = sev = None
-            if any(k in path for k in _ADMIN_KW):
+            if _kw_hit(path, _ADMIN_KW):
                 kind, sev = "admin", Severity.MEDIUM
-            elif any(k in path for k in _DEBUG_KW):
+            elif _kw_hit(path, _DEBUG_KW):
                 kind, sev = "debug", Severity.MEDIUM
-            elif any(k in path for k in _DIAG_KW):
+            elif _kw_hit(path, _DIAG_KW):
                 kind, sev = "diagnostic", Severity.LOW
             if not kind:
                 continue
@@ -402,19 +426,27 @@ class ExposedInterfaceCheck(Check):
                 continue
             seen.add(url)
             protected = st in (401, 403)
+            verified = st is not None
+            # Don't claim reachability we never checked: an unprobed path is a
+            # POTENTIAL lead (status/wording reflect that), a probed one is OBSERVED.
             out.append(VulnResult(
                 asset=ctx.host, url=url,
                 check_id=self.id, check_name=f"Exposed {kind} interface",
                 category=self.category,
-                status=Status.OBSERVED, severity=(Severity.LOW if protected else sev),
-                confidence=0.6 if st is None else 0.85,
+                status=Status.OBSERVED if verified else Status.POTENTIAL,
+                severity=(Severity.LOW if protected else sev),
+                confidence=0.85 if verified else 0.4,
                 detection_method="path-signature",
-                severity_rationale=(f"A {kind} interface is reachable"
-                                    + (" but appears auth-protected (401/403)." if protected
-                                       else " and may expose privileged functionality.")),
+                severity_rationale=(
+                    (f"A {kind} interface path returned {st}"
+                     + (" but appears auth-protected (401/403)." if protected
+                        else " and may expose privileged functionality."))
+                    if verified else
+                    (f"URL path matches a {kind}-interface signature; reachability "
+                     f"was NOT probed by this check — verify before relying on it.")),
                 remediation="Restrict to trusted networks / require authentication; remove from production.",
                 tier=self.tier,
-                evidence={"path": path[:200], "http_status": st},
+                evidence={"path": path[:200], "http_status": st if verified else "unprobed"},
             ))
         return out
 

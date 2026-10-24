@@ -22,12 +22,17 @@ class NucleiModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["FINDING_CANDIDATE"]
     flags = ["active", "web", "slow", "vuln"]
+    # Vulnerability scanning is high value; without this the planner derives
+    # value=MEDIUM(3) vs the "slow" cost=HIGH(8) → score -5 < min_value(0) and
+    # silently skips nuclei entirely (same bug that disabled the port scanners).
+    expected_value = 8
     options = {"timeout": 180, "severity": "info"}
     deps_binary = ["nuclei"]
 
     async def handle_event(self, event: Event) -> None:
         from recon.nuclei import NucleiWrapper
-        await NucleiWrapper(timeout=self.opt("timeout"), limiter=self.rate_limiter).scan(
+        await NucleiWrapper(timeout=self.opt("timeout"), limiter=self.rate_limiter,
+                            proxy_url=self.proxy_url).scan(
             event.data.url,
             self._ctrl.stamp_and_publish,
             scan_job_id=self._ctrl.scan_id,

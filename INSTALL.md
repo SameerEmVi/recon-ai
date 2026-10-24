@@ -17,6 +17,7 @@ external recon binaries, database, and AI configuration.
 | **git** | cloning | |
 | **Go ≥ 1.21** | building the recon binaries | only if you want active recon (subfinder, dnsx, httpx, …) |
 | **Npcap** (Windows) | `naabu` SYN port scans | [npcap.com](https://npcap.com) — optional |
+| **RustScan** | `-m rustscan` port discovery (opt-in alternative to naabu) | [bee-san/RustScan](https://github.com/bee-san/RustScan) — optional |
 | **ANTHROPIC_API_KEY** | `--ai` / `--agent` | optional; everything works without it |
 
 Recon-AI runs fully in **deterministic mode with zero external binaries** — the
@@ -96,6 +97,33 @@ go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/ffuf/ffuf/v2@latest
 ```
+
+### Optional: RustScan (alternative port scanner)
+
+RustScan is an **opt-in** alternative to naabu for port discovery (select it with
+`-m rustscan`). naabu stays the default; if RustScan is absent the module
+warn-and-skips. Install any one of:
+
+```bash
+cargo install rustscan                 # from source (Rust toolchain)
+# or a prebuilt release: https://github.com/bee-san/RustScan/releases
+# or Docker:  docker run -it --rm rustscan/rustscan:latest
+```
+
+Recon-AI runs RustScan in greppable mode with scripts disabled, so it only
+reports open ports — the existing `nmap` module (if enabled) performs the
+`-sV` service/version follow-up on discovered ports. Port scanning requires
+`--mode active` or `--mode full` and an in-scope IP/CIDR (resolved IPs are OUT
+under a domain-only scope — add `--in-scope <ip/CIDR>`). Example:
+
+```bash
+python -m cli.main scan example.com --mode active \
+  --in-scope 203.0.113.10 -m subfinder -m dnsx -m rustscan -m nmap
+```
+
+Tunable options (via `-m rustscan` module config): `ports` (`top-1000` | `full`
+| `80,443,8080`), `batch_size` (default 1500), `timeout_ms` (2000), `tries`,
+`ulimit`, `scan_order` (`serial` | `random`), `exclude_ports`.
 
 Directory/content discovery uses the **ffuf** binary (the `ffuf` module). It is
 **required** for content discovery — install it with the `go install` above.
@@ -221,6 +249,49 @@ Exposes 8 tools: `start_scan`, `get_scan_status`, `list_scans`, `list_hosts`,
 | A module logs "binary not found — module disabled" | That tool isn't installed; install it or ignore (module is skipped). |
 | `--ai` / `--agent` "skipped" warning | Set `ANTHROPIC_API_KEY` **and** pass `--db-url`. |
 | Active modules find nothing on a bare domain | IPs are OOS by default; add `--in-scope <ip/CIDR>`. |
+
+## Routing traffic through Burp Suite
+
+Recon-AI can send all outbound HTTP(S) through a proxy so you can inspect it in
+Burp Proxy / HTTP history. TLS verification stays **on** — HTTPS interception
+requires trusting Burp's CA explicitly (never a silent downgrade).
+
+1. In Burp: **Proxy → Options**, confirm a listener on `127.0.0.1:8080`.
+2. Export Burp's CA: **Proxy → Options → Import / export CA certificate →
+   Certificate in DER/PEM**. Save it as e.g. `burp-ca.pem` (convert DER→PEM with
+   `openssl x509 -inform der -in cacert.der -out burp-ca.pem` if needed).
+3. Run with the proxy + CA:
+
+```bash
+# HTTP and HTTPS through Burp, verifying against Burp's CA:
+python -m cli.main scan example.com --mode active \
+  --proxy http://127.0.0.1:8080 --proxy-ca ./burp-ca.pem --debug
+
+# Or via environment (so you don't repeat it every run):
+export RECON_AI_PROXY=http://127.0.0.1:8080
+export RECON_AI_PROXY_CA=./burp-ca.pem
+python -m cli.main scan example.com --mode active --debug
+```
+
+4. Verify connectivity without scanning: `python -m cli.main diagnostics --proxy-check http://127.0.0.1:8080`.
+
+`--debug` writes structured diagnostics to
+`results/<domain>/run-<id>/diagnostics/` (`events.jsonl`, `errors.jsonl`,
+`http.jsonl`, `summary.json`). Inspect them with
+`python -m cli.main diagnostics <domain> [--errors-only] [--module <name>]` or
+bundle them with `--export`.
+
+**Common proxy failures**
+
+| Symptom | Cause / fix |
+|---|---|
+| `configured proxy … is unreachable` (scan stops) | Burp isn't listening / wrong port. Start Burp or fix `--proxy`. No silent direct fallback by design. |
+| `TLSVerificationError` on HTTPS | Burp's CA not trusted. Pass `--proxy-ca <burp-ca.pem>` (do **not** disable TLS). |
+| `CA cert does not include key usage extension` | This Burp's CA predates the `keyUsage` extension that modern OpenSSL requires. Regenerate Burp's CA (Settings → TLS → regenerate), **or** for local testing use `--proxy-insecure` (explicit, logged — not a silent bypass). |
+| Grab Burp's CA quickly | With the proxy running: `curl -x http://127.0.0.1:8080 http://burp/cert -o burp-ca.der && openssl x509 -inform der -in burp-ca.der -out burp-ca.pem`. |
+| External tools (nuclei/ffuf/httpx) show TLS errors in Burp | Those Go tools do their own TLS and don't read `--proxy-ca`; trust Burp's CA in the OS store, or they fall back to their own lenient behaviour. The `--proxy`/`-x` flags still route them through Burp. |
+| `ProxyAuthenticationError` | Upstream proxy needs creds; put them in the URL `http://user:pass@host:port` (redacted in logs). |
+| HTTPS pages show as errors in Burp | Re-export the current Burp CA; it rotates per Burp installation/project. |
 
 See [`CLAUDE.md`](CLAUDE.md) for the full architecture and machine-specific
 toolchain notes.

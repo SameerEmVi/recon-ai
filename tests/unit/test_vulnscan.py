@@ -196,6 +196,40 @@ async def test_exposed_interface_reachability_and_protection():
     assert res3 and res3[0].severity == Severity.LOW
 
 
+async def test_exposed_interface_no_substring_false_positives():
+    chk = ExposedInterfaceCheck()
+    # "manage" must NOT match "managed-..." (the amaru.co.nz false positive).
+    ctx = _ctx(services=[{"url": "https://x.com/services/managed-security-training/",
+                          "status": 200}])
+    ctx.urls = {"https://x.com/services/managed-security-training/"}
+    assert await chk.run(ctx) == []
+
+    # A static asset with an 'admin' dir in its path is not an interface.
+    ctx2 = _ctx(services=[{"url": "https://x.com/themes/divi/core/admin/js/common.js",
+                           "status": 200}])
+    ctx2.urls = {"https://x.com/themes/divi/core/admin/js/common.js"}
+    assert await chk.run(ctx2) == []
+
+    # Real wp-admin is still caught.
+    ctx3 = _ctx(services=[{"url": "https://x.com/wp-admin/", "status": 200}])
+    ctx3.urls = {"https://x.com/wp-admin/"}
+    assert await chk.run(ctx3)
+
+
+async def test_exposed_interface_unprobed_is_potential_not_observed():
+    chk = ExposedInterfaceCheck()
+    # /admin known only as a URL (never probed → status None): a POTENTIAL lead,
+    # NOT an OBSERVED "reachable" claim.
+    ctx = _ctx()
+    ctx.urls = {"https://x.com/admin"}
+    res = await chk.run(ctx)
+    assert res and res[0].status == Status.POTENTIAL
+    assert res[0].confidence == 0.4
+    # Wording must not claim reachability we never checked.
+    assert "reachability was not probed" in res[0].severity_rationale.lower()
+    assert res[0].evidence["http_status"] == "unprobed"
+
+
 async def test_version_cve_check_potential_only():
     chk = VersionCveCheck()
     ctx = _ctx(technologies={"jquery": "3.4.1"})

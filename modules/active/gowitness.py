@@ -28,6 +28,10 @@ class GoWitnessModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["ANOMALY"]
     flags = ["active", "web", "screenshots", "slow"]
+    # Without a value boost the planner skips this "slow" module by default
+    # (value MEDIUM vs cost HIGH → score -5); screenshots are worth running in
+    # a full scan.
+    expected_value = 8
     options = {"timeout": 30, "screenshot_dir": "screenshots"}
     deps_binary = ["gowitness"]
 

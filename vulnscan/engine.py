@@ -219,8 +219,13 @@ class AssessmentEngine:
             ctx.headers[url] = hdrs
             ctx.status[url] = getattr(res, "status_code", None)
             ctx.bodies[url] = getattr(res, "text", None) or ""
-            sc = hdrs.get("set-cookie")
-            ctx.set_cookies[url] = [sc] if sc else []
+            # Prefer the per-cookie list: the merged header value lets one
+            # hardened cookie's flags hide another cookie that lacks them.
+            cookies = list(getattr(res, "set_cookies", None) or ())
+            if not cookies:
+                sc = hdrs.get("set-cookie")
+                cookies = [sc] if sc else []
+            ctx.set_cookies[url] = cookies
 
     @staticmethod
     def _dedup(results: list[VulnResult]) -> list[VulnResult]:

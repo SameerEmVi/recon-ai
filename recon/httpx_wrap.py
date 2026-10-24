@@ -17,15 +17,19 @@ class HttpxWrapper(BaseReconTool):
 
     binary = "httpx"
 
-    @staticmethod
-    def _args(target: str) -> list[str]:
-        return [
+    def _args(self, target: str) -> list[str]:
+        args = [
             "-target", target,
             "-silent", "-json",
             "-title", "-server", "-status-code",
             "-content-length", "-follow-redirects",
             "-td",  # tech-detect: httpx's bundled Wappalyzer fingerprint DB
         ]
+        from net.proxy import get_proxy
+        p = get_proxy(self._ctrl)
+        if p.active:
+            args += ["-proxy", p.url]   # route probe traffic through Burp
+        return args
 
     async def _probe_one(
         self,

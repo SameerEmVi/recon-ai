@@ -290,3 +290,60 @@ def test_malformed_rule_raises_at_parse_time():
 def test_decision_always_has_reason():
     d = evaluate("api.example.com", in_scope=["*.example.com"])
     assert d.reason  # non-empty explanation on every decision
+
+
+# ---------------------------------------------------------------------------
+# Underscore DNS labels (_dmarc, _domainkey, _acme-challenge, SRV) must stay
+# in scope — they are recon-relevant and Python's idna codec would otherwise
+# reject them during normalization, dropping them as invalid.
+# ---------------------------------------------------------------------------
+
+def test_underscore_label_is_in_scope():
+    d = evaluate("_dmarc.example.com", in_scope=["*.example.com"])
+    assert d.status is ScopeStatus.IN
+
+
+def test_underscore_multilabel_in_scope():
+    d = evaluate("_acme-challenge.api.example.com", in_scope=["*.example.com"])
+    assert d.status is ScopeStatus.IN
+
+
+def test_underscore_host_still_denied_when_out_of_scope():
+    # The underscore relaxation must not widen scope: an out-of-scope
+    # underscore host is still OUT (default deny holds).
+    d = evaluate("_dmarc.evil.com", in_scope=["*.example.com"])
+    assert d.status is ScopeStatus.OUT
+
+
+def test_underscore_host_respects_deny_subtree():
+    d = evaluate("_dmarc.internal.example.com",
+                 in_scope=["*.example.com"],
+                 out_scope=["internal.example.com"])
+    assert d.status is ScopeStatus.OUT
+
+
+# ---------------------------------------------------------------------------
+# Hyphen-edged labels. RFC 952/1123 forbid a label starting or ending with "-",
+# and a leading "-" would make a target-supplied hostname parse as a CLI option
+# when passed positionally to a recon binary (e.g. "-oN.example.com").
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("candidate", [
+    "-oN.example.com",
+    "-x.example.com",
+    "a.-p.example.com",
+    "api-.example.com",
+])
+def test_hyphen_edged_label_is_out(candidate):
+    d = evaluate(candidate, in_scope=["*.example.com"])
+    assert d.status is ScopeStatus.OUT
+
+
+@pytest.mark.parametrize("candidate", [
+    "my-api.example.com",
+    "xn--bcher-kva.example.com",   # punycode keeps its internal hyphens
+    "a-b-c.example.com",
+])
+def test_internal_hyphens_still_in(candidate):
+    d = evaluate(candidate, in_scope=["*.example.com"])
+    assert d.status is ScopeStatus.IN

@@ -72,7 +72,7 @@ WEB_MODULES = ["gau", "nuclei", "fingerprint", "whatweb", "takeover", "urlfinder
 CRAWL_MODULES = ["katana", "gowitness"]
 
 # Content discovery, JS analysis, and quick-win vuln checks.
-DISCOVERY_MODULES = ["ffuf", "extfuzz", "linkfinder", "paramfinder", "apifinder", "js_intel", "corscanner", "bypass403", "secretfinder", "trufflehog", "metascan", "wordlist_learner"]
+DISCOVERY_MODULES = ["ffuf", "extfuzz", "linkfinder", "paramfinder", "apifinder", "js_intel", "jsluice", "retirejs", "corscanner", "bypass403", "secretfinder", "trufflehog", "metascan", "wordlist_learner"]
 
 # Cloud asset intelligence + storage / bucket exposure.
 CLOUD_MODULES = ["cloud_intel", "s3scanner", "cloud_enum"]

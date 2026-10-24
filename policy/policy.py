@@ -117,6 +117,7 @@ MODULE_CAPABILITIES: dict[str, frozenset[str]] = {
     "whatweb": frozenset({CAP_TARGET_HTTP_REQUEST}),
     "apifinder": frozenset({CAP_TARGET_HTTP_REQUEST}),
     "js_intel": frozenset({CAP_TARGET_HTTP_REQUEST}),
+    "jsluice": frozenset({CAP_TARGET_HTTP_REQUEST}),   # fetches JS from the target
     "linkfinder": frozenset({CAP_TARGET_HTTP_REQUEST}),
     "secretfinder": frozenset({CAP_TARGET_HTTP_REQUEST}),
     "trufflehog": frozenset({CAP_TARGET_HTTP_REQUEST}),
@@ -130,11 +131,13 @@ MODULE_CAPABILITIES: dict[str, frozenset[str]] = {
 
     # port scanning
     "naabu": frozenset({CAP_PORT_SCANNING}),
+    "rustscan": frozenset({CAP_PORT_SCANNING}),
     "nmap": frozenset({CAP_PORT_SCANNING}),
 
     # vulnerability assessment (non-intrusive)
     "vulnassess": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),
     "nuclei": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),
+    "retirejs": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),
     "corscanner": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),
     "bypass403": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),
     "takeover": frozenset({CAP_VULNERABILITY_CHECK, CAP_TARGET_HTTP_REQUEST}),

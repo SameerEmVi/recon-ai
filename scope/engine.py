@@ -197,7 +197,15 @@ def _looks_like_hostname(domain: str) -> bool:
     for label in labels:
         if not label or len(label) > 63:
             return False
-        # allow a-z 0-9 and hyphen (punycode already applied upstream)
-        if not all(c.isalnum() or c == "-" for c in label):
+        # allow a-z 0-9, hyphen, and underscore (punycode already applied
+        # upstream). Underscore is not valid in a *public* hostname but is
+        # common and recon-relevant in DNS labels (_dmarc, _domainkey,
+        # _acme-challenge, SRV records), so we keep them in scope.
+        if not all(c.isalnum() or c in "-_" for c in label):
+            return False
+        # A label may not start or end with a hyphen (RFC 952/1123). Beyond
+        # validity, a leading "-" makes a target-supplied hostname parse as a
+        # command-line option when passed positionally to a recon binary.
+        if label[0] == "-" or label[-1] == "-":
             return False
     return True

@@ -26,7 +26,7 @@ import uuid
 
 import typer
 
-from scope.types import Scope
+from scope.types import Scope, ScopeStatus
 
 app = typer.Typer(
     name="recon-ai",
@@ -234,6 +234,27 @@ def scan(
             "SQLite:     'sqlite+aiosqlite:///recon.db'"
         ),
     ),
+    proxy: str | None = typer.Option(
+        None, "--proxy",
+        help="Route outbound HTTP(S) through a proxy, e.g. Burp: http://127.0.0.1:8080 "
+             "(or set RECON_AI_PROXY). TLS verification stays ON.",
+    ),
+    proxy_ca: str | None = typer.Option(
+        None, "--proxy-ca",
+        help="Path to the proxy's CA bundle (PEM) for HTTPS interception, e.g. Burp's "
+             "exported CA (or set RECON_AI_PROXY_CA). Explicit opt-in; never disables TLS.",
+    ),
+    proxy_insecure: bool = typer.Option(
+        False, "--proxy-insecure",
+        help="Disable TLS verification for proxied traffic (local Burp testing only, "
+             "e.g. when Burp's CA lacks the keyUsage extension). Explicit + logged, "
+             "never silent. Prefer --proxy-ca with a valid CA.",
+    ),
+    debug: bool = typer.Option(
+        False, "--debug",
+        help="Write verbose structured diagnostics (events/errors/http JSONL) under "
+             "results/<domain>/run-<id>/diagnostics/.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     quiet: bool = typer.Option(
         False, "--quiet", "-q",
@@ -265,6 +286,29 @@ def scan(
     except ValueError as exc:
         typer.echo(f"[error] invalid scope rule: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    # Fail closed before any setup: the seed gets the same deny-first gate as
+    # every other target (the controller re-checks this in run()).
+    from scope.engine import ScopeEngine
+    seed_decision = ScopeEngine(scope).evaluate(domain)
+    if seed_decision.status is not ScopeStatus.IN:
+        typer.echo(f"[error] seed {domain!r} is not in scope: {seed_decision.reason}", err=True)
+        raise typer.Exit(code=1)
+
+    # Outbound proxy (Burp) config: CLI > env (> config file, future). Fail closed
+    # on a bad proxy URL / missing CA — never silently disable TLS.
+    from net.errors import ConfigurationError
+    from net.proxy import ProxyConfig
+    try:
+        proxy_cfg = ProxyConfig.from_sources(
+            cli_proxy=proxy, cli_ca=proxy_ca,
+            cli_verify=False if proxy_insecure else None, diagnostic=debug)
+    except ConfigurationError as exc:
+        typer.echo(f"[error] proxy configuration: {exc}", err=True)
+        raise typer.Exit(code=1)
+    if proxy_cfg.active and not proxy_cfg.verify and not proxy_cfg.ca_bundle:
+        typer.echo(ui.warn("TLS verification DISABLED for proxied traffic "
+                           "(--proxy-insecure) — local testing only"))
 
     ai_effective = ai or agent
 
@@ -397,6 +441,8 @@ def scan(
         results_enabled=not no_results,
         out_dir=out_dir,
         live=not quiet,
+        proxy=proxy_cfg,
+        debug=debug,
     )
 
     try:
@@ -707,6 +753,97 @@ async def _wordlist_export(
         else:
             for w in await kb.generate_wordlist(category, **kw):
                 typer.echo(w)
+
+
+@app.command()
+def diagnostics(
+    domain: str | None = typer.Argument(
+        None, help="Target domain whose run diagnostics to inspect. Omit to use the "
+                   "most recent run across all targets."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Inspect a specific run id."),
+    errors_only: bool = typer.Option(False, "--errors-only", help="Show only error records."),
+    module: str | None = typer.Option(None, "--module", help="Filter records to one module."),
+    export: bool = typer.Option(False, "--export", help="Write a sanitized .zip bundle of the run's diagnostics and print its path."),
+    proxy_check: str | None = typer.Option(
+        None, "--proxy-check", help="Test connectivity to a proxy URL (no scan) and exit."),
+    out_dir: str = typer.Option("results", "--out-dir"),
+    limit: int = typer.Option(30, "--limit", help="Max records to print."),
+) -> None:
+    """Inspect a finished scan's structured diagnostics (no scanning is performed)."""
+    import glob
+    import json as _json
+    from cli import ui
+
+    # --proxy-check is a standalone connectivity probe (no target traffic).
+    if proxy_check is not None:
+        from net.errors import ConfigurationError
+        from net.proxy import ProxyConfig
+        try:
+            cfg = ProxyConfig.from_sources(cli_proxy=proxy_check)
+        except ConfigurationError as exc:
+            typer.echo(f"[error] {exc}", err=True)
+            raise typer.Exit(code=1)
+        ok, msg = asyncio.run(cfg.probe())
+        typer.echo((ui.ok if ok else ui.warn)(f"{cfg.describe()} → {msg}"))
+        raise typer.Exit(code=0 if ok else 2)
+
+    # Locate run directories: results/<domain>/run-<id>/diagnostics/
+    pattern = os.path.join(out_dir, domain or "*", "run-*", "diagnostics")
+    dirs = [d for d in glob.glob(pattern) if os.path.isdir(d)]
+    if run_id:
+        dirs = [d for d in dirs if f"run-{run_id}" in d]
+    if not dirs:
+        typer.echo("no diagnostics found (run a scan with --debug or --proxy)", err=True)
+        raise typer.Exit(code=1)
+    diag_dir = max(dirs, key=os.path.getmtime)   # most recent
+    run_dir = os.path.dirname(diag_dir)
+
+    if export:
+        import zipfile
+        bundle = run_dir + "-diagnostics.zip"
+        with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fn in os.listdir(diag_dir):
+                zf.write(os.path.join(diag_dir, fn), arcname=fn)
+        typer.echo(ui.ok(f"sanitized diagnostics bundle → {bundle}"))
+        raise typer.Exit(code=0)
+
+    summary_path = os.path.join(diag_dir, "summary.json")
+    if os.path.isfile(summary_path):
+        s = _json.loads(open(summary_path, encoding="utf-8").read())
+        print(ui.section("Diagnostics", os.path.basename(run_dir)))
+        print(ui.kv("run-id", s.get("run_id")))
+        print(ui.kv("errors", s.get("total_errors", 0)))
+        for cat, n in (s.get("errors_by_category") or {}).items():
+            print(ui.bullet(f"{ui.paint(str(n), 'byellow')}  {cat}"))
+        for mod, n in (s.get("errors_by_module") or {}).items():
+            print(ui.bullet(f"{ui.paint(str(n), 'bred')}  module {mod}", "grey"))
+
+    stream = "errors" if errors_only else "events"
+    path = os.path.join(diag_dir, f"{stream}.jsonl")
+    if not os.path.isfile(path):
+        return
+    print("\n" + ui.section(stream))
+    shown = 0
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            continue
+        if module and rec.get("module") != module:
+            continue
+        ts = (rec.get("timestamp") or "")[11:19]
+        lvl = rec.get("level", "")
+        fg = "bred" if lvl in ("ERROR", "CRITICAL") else "grey"
+        extra = rec.get("error_type") or rec.get("status") or ""
+        print(ui.bullet(f"{ts} {ui.paint(lvl, fg)} {rec.get('event')} "
+                        f"{rec.get('module') or ''} {extra}"))
+        shown += 1
+        if shown >= limit:
+            break
+    print(ui.info(f"diagnostics dir → {diag_dir}"))
 
 
 if __name__ == "__main__":

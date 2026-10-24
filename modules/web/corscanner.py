@@ -41,6 +41,10 @@ class CorsScannerModule(BaseModule):
         if not url:
             return
 
+        from policy import CAP_TARGET_HTTP_REQUEST
+        if not self.capability_ok(CAP_TARGET_HTTP_REQUEST, action="CORS origin probe"):
+            return
+
         try:
             import httpx
         except ImportError:
@@ -55,7 +59,7 @@ class CorsScannerModule(BaseModule):
         ]
 
         try:
-            async with httpx.AsyncClient(
+            async with self.http_client(
                 timeout=self.opt("timeout"),
                 follow_redirects=False,
             ) as client:

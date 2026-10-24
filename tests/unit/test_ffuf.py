@@ -96,6 +96,23 @@ def test_build_command_autocalibrate_flag_and_no_double_fuzz():
     assert "-fc" not in cmd and "-fs" not in cmd
 
 
+def test_build_command_maxtime_emitted_only_when_positive():
+    # max_time > 0 → ffuf -maxtime so it stops gracefully and writes partial JSON
+    cmd = build_command(
+        target_url="https://x.com",
+        wordlist="/wl.txt",
+        output_file="/o.json",
+        max_time=600,
+    )
+    assert "-maxtime" in cmd and cmd[cmd.index("-maxtime") + 1] == "600"
+
+    # default (0) → no -maxtime (unbounded, rely on caller's subprocess timeout)
+    cmd0 = build_command(
+        target_url="https://x.com", wordlist="/wl.txt", output_file="/o.json"
+    )
+    assert "-maxtime" not in cmd0
+
+
 # ── result parsing ────────────────────────────────────────────────────────────
 
 def test_parse_ffuf_json_extracts_results():

@@ -19,7 +19,7 @@ from modules.active.zonetransfer import parse_ns, parse_axfr
 from modules.active.tlsx import parse_tlsx_sans
 from modules.active.hakip2host import parse_hakip2host
 from modules.passive.github_subdomains import parse_lines
-from modules.web.takeover import classify_takeover
+from modules.web.takeover import assess_takeover, classify_takeover
 from scope.engine import ScopeEngine
 from scope.types import Scope, ScopeStatus
 
@@ -185,6 +185,7 @@ async def test_takeover_no_fingerprint_service_is_low_unverified():
     ctrl = _ctrl()
     m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
     m._fetch_body = AsyncMock(return_value=(403, "anything"))
+    m._target_resolves = AsyncMock(return_value=None)  # resolution inconclusive
     await m.handle_event(_cname_event("assets.example.com", "d123.cloudfront.net"))
     finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
     assert len(finds) == 1
@@ -198,11 +199,80 @@ async def test_takeover_unreachable_host_is_low_unverified():
     ctrl = _ctrl()
     m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
     m._fetch_body = AsyncMock(return_value=(None, None))
+    m._target_resolves = AsyncMock(return_value=None)  # resolution inconclusive
     await m.handle_event(_cname_event("blog.example.com", "ghost.herokuapp.com"))
     finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
     assert len(finds) == 1
     assert finds[0].severity_hint == "low"
     assert "unverified" in finds[0].title
+
+
+async def test_takeover_nxdomain_target_is_medium_likely():
+    # Body inconclusive (CloudFront has no body fingerprint), but the CNAME
+    # target itself does not resolve (NXDOMAIN) → MEDIUM "likely" takeover,
+    # driven purely by the HTTP-independent DNS signal.
+    from unittest.mock import AsyncMock
+    ctrl = _ctrl()
+    m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
+    m._fetch_body = AsyncMock(return_value=(502, "anything"))
+    m._target_resolves = AsyncMock(return_value=False)
+    await m.handle_event(_cname_event("assets.example.com", "d123.cloudfront.net"))
+    finds = _emitted(ctrl, EventType.FINDING_CANDIDATE)
+    assert len(finds) == 1
+    assert finds[0].severity_hint == "medium"
+    assert "Likely" in finds[0].title
+    assert finds[0].evidence["detection"] == "cname-target-nxdomain"
+    assert finds[0].evidence["cname_target_resolves"] == "false"
+    assert finds[0].evidence["sig_version"]
+
+
+def test_assess_takeover_matrix():
+    # 1. unclaimed body fingerprint → confirmed HIGH, keep.
+    assert assess_takeover("AWS S3", True, None) == (True, "high", "unclaimed-fingerprint")
+    # 2. live/claimed body → suppressed (not a takeover), regardless of DNS.
+    assert assess_takeover("AWS S3", False, False) == (False, "", "claimed")
+    assert assess_takeover("AWS S3", False, True) == (False, "", "claimed")
+    # 3. body inconclusive + target NXDOMAIN → likely MEDIUM.
+    assert assess_takeover("AWS CloudFront", None, False) == (True, "medium", "cname-target-nxdomain")
+    # 4. body inconclusive + target resolves / unknown → unverified LOW.
+    assert assess_takeover("AWS CloudFront", None, True) == (True, "low", "unverified")
+    assert assess_takeover("AWS CloudFront", None, None) == (True, "low", "unverified")
+
+
+async def test_target_resolves_states(monkeypatch):
+    import socket
+    from unittest.mock import AsyncMock, MagicMock
+    import modules.web.takeover as tk
+
+    ctrl = _ctrl()
+    m = ModuleRegistry.load(names=["takeover"], controller=ctrl)[0]
+
+    def _patch(side_effect):
+        fake_loop = MagicMock()
+        fake_loop.getaddrinfo = AsyncMock(side_effect=side_effect)
+        monkeypatch.setattr(tk.asyncio, "get_running_loop", lambda: fake_loop)
+        return fake_loop
+
+    # Resolves → True.
+    _patch([[(2, 1, 6, "", ("1.2.3.4", 0))]])
+    assert await m._target_resolves("live.cloudfront.net") is True
+
+    # NXDOMAIN on both attempts → False (re-observed), getaddrinfo called twice.
+    nx = socket.gaierror(11001, "host not found")
+    loop = _patch([nx, nx])
+    assert await m._target_resolves("gone.cloudfront.net") is False
+    assert loop.getaddrinfo.await_count == 2
+
+    # Transient (errno not a definitive NXDOMAIN) → inconclusive None.
+    loop = _patch([socket.gaierror(11002, "try again")])
+    assert await m._target_resolves("flaky.cloudfront.net") is None
+
+    # NXDOMAIN once, then resolves → True (retry recovered the blip).
+    loop = _patch([nx, [[(2, 1, 6, "", ("1.2.3.4", 0))]]])
+    assert await m._target_resolves("blip.cloudfront.net") is True
+
+    # Empty target → None without any lookup.
+    assert await m._target_resolves("") is None
 
 
 async def test_takeover_ignores_non_cname_and_unknown():

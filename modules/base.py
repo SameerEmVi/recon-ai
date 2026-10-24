@@ -32,6 +32,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _set_cookie_list(headers: Any) -> tuple[str, ...]:
+    """Each Set-Cookie header separately (httpx merges them in a plain dict).
+
+    Falls back to the single (possibly merged) value for header objects without
+    `get_list` — e.g. a plain mapping from a mocked response.
+    """
+    get_list = getattr(headers, "get_list", None)
+    if callable(get_list):
+        return tuple(get_list("set-cookie"))
+    try:
+        value = headers.get("set-cookie")
+    except Exception:
+        return ()
+    return (value,) if value else ()
+
+
 class BaseModule(ABC):
     # ── class-level declarations (set by each subclass) ───────────────────────
 
@@ -168,6 +184,43 @@ class BaseModule(ABC):
         from policy import get_policy
         return get_policy(self._ctrl)
 
+    @property
+    def proxy(self):
+        """The scan's ProxyConfig (disabled default under a mock controller)."""
+        from net.proxy import get_proxy
+        return get_proxy(self._ctrl)
+
+    @property
+    def diagnostics(self):
+        """The scan's DiagnosticsLogger (NOOP under a mock controller)."""
+        from diagnostics.logger import get_diagnostics
+        return get_diagnostics(self._ctrl)
+
+    @property
+    def proxy_url(self) -> str | None:
+        """The active proxy URL, or None — for threading into external tools'
+        own proxy flags (nuclei -proxy, ffuf -x, katana -proxy …)."""
+        p = self.proxy
+        return p.url if p.active else None
+
+    def http_client(self, **kwargs):
+        """Build an httpx.AsyncClient pre-configured with the scan's proxy + TLS
+        trust, so every module's traffic routes through Burp when enabled and no
+        module opens an unconfigured client.
+
+        Caller kwargs (timeout/headers/…) override the defaults. A caller that
+        explicitly passes verify=False keeps that (some checks must reach hosts
+        with broken certs) but it is WARNED, never silent — per the no-silent-
+        TLS-disable rule.
+        """
+        import httpx
+        base = self.proxy.client_kwargs()
+        if kwargs.get("verify") is False and base.get("verify") is not False:
+            self._log.warning(
+                "%s: verify=False — TLS verification disabled for this client "
+                "(explicit, not silent)", self.name)
+        return httpx.AsyncClient(**{**base, **kwargs})
+
     def guard(self, bucket: str | None = None):
         """Async context manager wrapping one network op with rate limiting.
 
@@ -176,6 +229,26 @@ class BaseModule(ABC):
                 r = await client.get(url)
         """
         return self.rate_limiter.guard(bucket or f"mod:{self.name}")
+
+    def capability_ok(self, capability: str, *, action: str = "") -> bool:
+        """Call-time capability gate for modules that bypass `fetch`/`run_proc`.
+
+        `fetch()` and `run_proc()` already re-check the mode policy at the moment
+        of action (defence-in-depth on top of module-load filtering). Modules
+        that keep their own network client — because they need bytes, custom
+        headers, or a raw DNS lookup rather than the shared text cache — must get
+        the same recheck instead of relying on the load filter alone. Returns
+        True when the action is permitted; logs and returns False when the mode
+        forbids it (never raises, so a denied probe degrades gracefully).
+        Under a mock controller the policy is ALLOW_ALL, so this is a no-op.
+        """
+        from policy import CapabilityDenied
+        try:
+            self.policy.check(capability, who=f"module '{self.name}'{' ' + action if action else ''}")
+            return True
+        except CapabilityDenied as exc:
+            self._log.warning("%s denied by mode policy: %s", action or capability, exc)
+            return False
 
     def inspect_response(self, resp: Any, *, body: str | None = None):
         """Feed an httpx response to WAF detection; auto-slows on block/challenge.
@@ -238,34 +311,45 @@ class BaseModule(ABC):
             return FetchResult(url=url, ok=False, error=f"capability denied: {exc}")
 
         async def _do_fetch() -> "FetchResult":
-            try:
-                import httpx
-            except ImportError:
-                self._log.warning("httpx not installed")
-                return FetchResult(url=url, ok=False, error="httpx not installed")
-            try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                        r = await client.get(url, follow_redirects=follow_redirects)
-                    self.inspect_response(r)
-                    ctype = r.headers.get("content-type")
-                    size_kb = len(r.content) / 1024
-                    # Store the FULL body (up to the global ceiling); per-caller
-                    # max_body_kb is applied below so the first fetcher's cap does
-                    # not starve a later caller with a larger one.
-                    text = r.text if size_kb <= CACHE_MAX_BODY_KB else None
-                    return FetchResult(
-                        url=url,
-                        status_code=r.status_code,
-                        text=text,
-                        headers=dict(r.headers),
-                        content_type=ctype,
-                        ok=True,
-                        size_kb=size_kb,
-                    )
-            except Exception as exc:
-                self._log.debug("fetch failed for %s: %s", url, exc)
-                return FetchResult(url=url, ok=False, error=str(exc))
+            import time
+            from diagnostics.logger import correlation, new_correlation_id
+            from net.errors import classify_http_error
+            diag = self.diagnostics
+            verify = self.proxy.verify_value()
+            with correlation(new_correlation_id()):
+                start = time.monotonic()
+                try:
+                    async with self.http_client(timeout=timeout) as client:
+                        async with self.guard(f"http:{urlparse(url).hostname or url}"):
+                            r = await client.get(url, follow_redirects=follow_redirects)
+                        self.inspect_response(r)
+                        ctype = r.headers.get("content-type")
+                        size_kb = len(r.content) / 1024
+                        # Store the FULL body (up to the global ceiling); per-caller
+                        # max_body_kb is applied below so the first fetcher's cap does
+                        # not starve a later caller with a larger one.
+                        text = r.text if size_kb <= CACHE_MAX_BODY_KB else None
+                        diag.http(module=self.name, operation="fetch", method="GET",
+                                  url=url, status=r.status_code,
+                                  duration_ms=(time.monotonic() - start) * 1000,
+                                  response_bytes=len(r.content), verify=verify)
+                        return FetchResult(
+                            url=url,
+                            status_code=r.status_code,
+                            text=text,
+                            headers=dict(r.headers),
+                            content_type=ctype,
+                            ok=True,
+                            size_kb=size_kb,
+                            set_cookies=_set_cookie_list(r.headers),
+                        )
+                except Exception as exc:
+                    info = classify_http_error(exc)
+                    diag.http(module=self.name, operation="fetch", method="GET",
+                              url=url, duration_ms=(time.monotonic() - start) * 1000,
+                              verify=verify, error=info.as_dict())
+                    self._log.debug("fetch failed for %s: %s", url, info.message)
+                    return FetchResult(url=url, ok=False, error=info.message)
 
         def _apply_cap(res: "FetchResult") -> "FetchResult":
             # Hide the body from THIS caller if it exceeds the caller's cap; the
@@ -277,7 +361,8 @@ class BaseModule(ABC):
         cache = get_response_cache(self._ctrl)
         if cache is None:  # mock controller / cache disabled → direct, uncached
             return _apply_cap(await _do_fetch())
-        return _apply_cap(await cache.get_or_fetch(ResponseCache.key(url), _do_fetch))
+        key = ResponseCache.key(url, follow_redirects=follow_redirects)
+        return _apply_cap(await cache.get_or_fetch(key, _do_fetch))
 
     async def run_proc(
         self, cmd: list[str], *, timeout: int = 60, bucket: str | None = None,
@@ -298,6 +383,7 @@ class BaseModule(ABC):
             self._log.warning("run_proc(%s) denied by mode policy: %s", cmd[0] if cmd else "?", reason)
             return None
         try:
+            from recon.proc import communicate, new_session_kwargs
             async with self.guard(bucket or f"proc:{self.name}"):
                 try:
                     proc = await asyncio.create_subprocess_exec(
@@ -305,19 +391,18 @@ class BaseModule(ABC):
                         stdin=asyncio.subprocess.PIPE if input_text else None,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        **new_session_kwargs(),
                     )
                 except FileNotFoundError:
                     self._log.warning("%s not found — module disabled", cmd[0])
                     return None
                 try:
-                    out, _ = await asyncio.wait_for(
-                        proc.communicate(
-                            input=input_text.encode() if input_text else None
-                        ),
-                        timeout=timeout,
+                    out, _ = await communicate(
+                        proc, timeout=timeout,
+                        input=input_text.encode() if input_text else None,
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    # communicate() already killed the whole tree + reaped.
                     self._log.warning("%s timed out", cmd[0])
                     return None
             return (out or b"").decode("utf-8", "replace")

@@ -26,6 +26,9 @@ class KatanaModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["URL"]
     flags = ["active", "web", "crawl", "slow"]
+    # Crawling feeds the whole discovery pipeline; without this the planner
+    # (value MEDIUM vs "slow" cost HIGH → score -5) skips it by default.
+    expected_value = 8
     options = {"timeout": 180, "depth": 3, "concurrency": 10, "js_crawl": True}
     deps_binary = ["katana"]
 
@@ -44,26 +47,29 @@ class KatanaModule(BaseModule):
         ]
         if self.opt("js_crawl"):
             cmd += ["-jc", "-js-crawl"]
+        if self.proxy_url:
+            cmd += ["-proxy", self.proxy_url]   # route crawl traffic through Burp
 
         self._log.info("katana crawling %s (depth=%s)", url, self.opt("depth"))
 
+        from recon.proc import communicate, new_session_kwargs
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **new_session_kwargs(),
             )
         except FileNotFoundError:
             self._log.warning("katana binary not found — module disabled")
             return
 
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self.opt("timeout")
-            )
+            stdout, _ = await communicate(proc, timeout=self.opt("timeout"))
         except asyncio.TimeoutError:
-            proc.kill()
-            self._log.warning("katana timed out after %ds on %s", self.opt("timeout"), url)
+            # communicate() already killed the katana process tree + reaped.
+            self._log.warning("katana timed out after %ds on %s — tree killed",
+                              self.opt("timeout"), url)
             return
 
         seen: set[str] = set()
