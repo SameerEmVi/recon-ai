@@ -231,8 +231,11 @@ def _ip_event(addr="10.0.0.5"):
                         scan_job_id=SCAN, source_tool="dnsx")
 
 
-@pytest.mark.parametrize("name", ["naabu", "rustscan", "nmap"])
-def test_port_scanner_not_skipped_at_default_threshold(name):
+@pytest.mark.parametrize("name", [
+    "naabu", "rustscan", "nmap",       # port scanners
+    "nuclei", "katana", "gowitness",   # slow active HTTP tools
+])
+def test_slow_high_value_module_not_skipped_at_default_threshold(name):
     from modules.registry import ModuleRegistry
     ModuleRegistry.discover()
     cls = ModuleRegistry.get(name)

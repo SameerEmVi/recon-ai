@@ -22,6 +22,10 @@ class NucleiModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["FINDING_CANDIDATE"]
     flags = ["active", "web", "slow", "vuln"]
+    # Vulnerability scanning is high value; without this the planner derives
+    # value=MEDIUM(3) vs the "slow" cost=HIGH(8) → score -5 < min_value(0) and
+    # silently skips nuclei entirely (same bug that disabled the port scanners).
+    expected_value = 8
     options = {"timeout": 180, "severity": "info"}
     deps_binary = ["nuclei"]
 

@@ -26,6 +26,9 @@ class KatanaModule(BaseModule):
     watched_events = ["HTTP_SERVICE"]
     produced_events = ["URL"]
     flags = ["active", "web", "crawl", "slow"]
+    # Crawling feeds the whole discovery pipeline; without this the planner
+    # (value MEDIUM vs "slow" cost HIGH → score -5) skips it by default.
+    expected_value = 8
     options = {"timeout": 180, "depth": 3, "concurrency": 10, "js_crawl": True}
     deps_binary = ["katana"]
 
