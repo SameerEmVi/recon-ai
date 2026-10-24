@@ -55,12 +55,14 @@ class NucleiWrapper:
             cmd += ["-proxy", self._proxy_url]   # route through Burp when configured
         log.debug("[nuclei] %s", " ".join(cmd))
 
+        from recon.proc import communicate, new_session_kwargs
         async with self._limiter.guard("nuclei"):
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **new_session_kwargs(),
                 )
             except FileNotFoundError:
                 if not _NOT_FOUND_WARNED:
@@ -69,12 +71,10 @@ class NucleiWrapper:
                 return
 
             try:
-                stdout, _ = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout
-                )
+                stdout, _ = await communicate(proc, timeout=self._timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                log.warning("[nuclei] timed out after %ds", self._timeout)
+                # communicate() already killed the nuclei process tree + reaped.
+                log.warning("[nuclei] timed out after %ds — process tree killed", self._timeout)
                 return
 
         import uuid as _uuid

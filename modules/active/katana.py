@@ -52,23 +52,24 @@ class KatanaModule(BaseModule):
 
         self._log.info("katana crawling %s (depth=%s)", url, self.opt("depth"))
 
+        from recon.proc import communicate, new_session_kwargs
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **new_session_kwargs(),
             )
         except FileNotFoundError:
             self._log.warning("katana binary not found — module disabled")
             return
 
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self.opt("timeout")
-            )
+            stdout, _ = await communicate(proc, timeout=self.opt("timeout"))
         except asyncio.TimeoutError:
-            proc.kill()
-            self._log.warning("katana timed out after %ds on %s", self.opt("timeout"), url)
+            # communicate() already killed the katana process tree + reaped.
+            self._log.warning("katana timed out after %ds on %s — tree killed",
+                              self.opt("timeout"), url)
             return
 
         seen: set[str] = set()

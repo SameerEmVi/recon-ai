@@ -383,6 +383,7 @@ class BaseModule(ABC):
             self._log.warning("run_proc(%s) denied by mode policy: %s", cmd[0] if cmd else "?", reason)
             return None
         try:
+            from recon.proc import communicate, new_session_kwargs
             async with self.guard(bucket or f"proc:{self.name}"):
                 try:
                     proc = await asyncio.create_subprocess_exec(
@@ -390,19 +391,18 @@ class BaseModule(ABC):
                         stdin=asyncio.subprocess.PIPE if input_text else None,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        **new_session_kwargs(),
                     )
                 except FileNotFoundError:
                     self._log.warning("%s not found — module disabled", cmd[0])
                     return None
                 try:
-                    out, _ = await asyncio.wait_for(
-                        proc.communicate(
-                            input=input_text.encode() if input_text else None
-                        ),
-                        timeout=timeout,
+                    out, _ = await communicate(
+                        proc, timeout=timeout,
+                        input=input_text.encode() if input_text else None,
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    # communicate() already killed the whole tree + reaped.
                     self._log.warning("%s timed out", cmd[0])
                     return None
             return (out or b"").decode("utf-8", "replace")

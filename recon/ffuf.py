@@ -284,12 +284,14 @@ class FfufWrapper:
         clean completion, False on missing binary / timeout / launch error."""
         global _NOT_FOUND_WARNED
         log.debug("[ffuf] %s", " ".join(cmd))
+        from recon.proc import communicate, new_session_kwargs
         async with self._limiter.guard(bucket):
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **new_session_kwargs(),
                 )
             except FileNotFoundError:
                 if not _NOT_FOUND_WARNED:
@@ -297,12 +299,10 @@ class FfufWrapper:
                     _NOT_FOUND_WARNED = True
                 return False
             try:
-                _, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout
-                )
+                _, stderr = await communicate(proc, timeout=self._timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                log.warning("[ffuf] timed out after %ds", self._timeout)
+                # communicate() already killed the ffuf process tree + reaped.
+                log.warning("[ffuf] timed out after %ds — process tree killed", self._timeout)
                 return False
         if proc.returncode not in (0, None):
             log.debug("[ffuf] exit %s: %s", proc.returncode,

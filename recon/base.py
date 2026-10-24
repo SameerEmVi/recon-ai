@@ -49,22 +49,24 @@ class BaseReconTool(ABC):
         try:
             # Hold a concurrency slot for the whole subprocess and space starts
             # by the configured rate (and any active WAF backoff).
+            from recon.proc import communicate, new_session_kwargs
             async with limiter.guard(bucket=self.binary):
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **new_session_kwargs(),
                 )
                 feed = stdin_data.encode() if stdin_data is not None else None
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(input=feed), timeout=timeout
-                )
+                stdout, stderr = await communicate(proc, input=feed, timeout=timeout)
             if stderr:
                 log.debug("%s stderr: %s", self.binary, stderr.decode(errors="replace")[:512])
             return stdout.decode(errors="replace").splitlines()
         except asyncio.TimeoutError:
-            log.error("%s timed out after %ds", self.binary, timeout)
+            # communicate() already terminated the whole process tree + reaped,
+            # so the timed-out tool no longer keeps hitting the target.
+            log.error("%s timed out after %ds — process tree killed", self.binary, timeout)
             return []
         except Exception as exc:
             log.error("%s failed: %s", self.binary, exc)

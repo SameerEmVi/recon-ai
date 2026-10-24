@@ -339,7 +339,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 |---|---|
 | `scope/` | Scope engine + types — the deterministic gate. The heart of the system. |
 | `events/` | Event model (`types.py`), pub/sub `bus.py`, `dedup.py` |
-| `recon/` | Subprocess wrappers around external binaries + `vocabulary.py` (learning extractor) + `jsintel.py` (JS-intelligence engine) + `cloudintel.py` (cloud-asset correlation engine) + `extfuzz.py` (extension-fuzzing engine — candidate generation + intelligent response classification) + `fetch.py` (shared per-scan HTTP body cache — one GET per URL, fanned out to every body-consuming module via `BaseModule.fetch`) |
+| `recon/` | Subprocess wrappers around external binaries + `vocabulary.py` (learning extractor) + `jsintel.py` (JS-intelligence engine) + `cloudintel.py` (cloud-asset correlation engine) + `extfuzz.py` (extension-fuzzing engine — candidate generation + intelligent response classification) + `fetch.py` (shared per-scan HTTP body cache) + `proc.py` (subprocess-tree termination — kills + reaps a tool tree on timeout/cancellation so a stopped scan leaves no orphan still hitting the target) |
 | `modules/` | Event-driven modules: `passive/`, `active/`, `web/` + `base.py`, `registry.py` |
 | `controller/` | `controller.py` (scan lifecycle) |
 | `database/` | SQLModel models, repositories, persister, session, diff, `knowledge_base.py` (persistent recon-learning service) (asyncpg/aiosqlite) |
@@ -355,7 +355,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (853 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (858 tests, all passing) |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -438,5 +438,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 853 tests passing. See persistent memory
+module system + MCP). 858 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.
