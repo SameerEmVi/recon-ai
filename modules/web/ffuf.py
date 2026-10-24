@@ -206,6 +206,7 @@ class FfufModule(BaseModule):
                 user_agent=str(self.opt("user_agent")),
                 recursion=bool(self.opt("recursion")),
                 recursion_depth=int(self.opt("recursion_depth")),
+                proxy=self.proxy_url,
             )
             # Hard backstop sits *above* -maxtime so ffuf has a grace window to
             # flush its results file before we'd ever kill it.

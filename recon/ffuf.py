@@ -180,6 +180,7 @@ def build_command(
     user_agent: str = "recon-ai/ffuf",
     recursion: bool = False,
     recursion_depth: int = 0,
+    proxy: str | None = None,
     binary: str = "ffuf",
 ) -> list[str]:
     """Build a fully-formed ffuf argv. Pure — no side effects (unit-tested).
@@ -206,6 +207,7 @@ def build_command(
         "-of", "json",
         "-s",                # silent: no live progress on stdout
         "-noninteractive",   # never prompt
+        *(["-x", proxy] if proxy else []),   # ffuf's proxy flag → route via Burp
     ]
 
     exts = [e for e in (extensions or []) if e]

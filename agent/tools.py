@@ -158,7 +158,10 @@ class NucleiInfoTool(AgentTool):
             return ToolResult(0, f"scope denied: {hostname}")
 
         from recon.nuclei import NucleiWrapper
-        wrapper = NucleiWrapper(limiter=get_limiter(self._controller))
+        from net.proxy import get_proxy
+        _p = get_proxy(self._controller)
+        wrapper = NucleiWrapper(limiter=get_limiter(self._controller),
+                                proxy_url=_p.url if _p.active else None)
 
         before = self._controller.bus.seen_count
         await wrapper.scan(target, self._controller.stamp_and_publish, scan_id)

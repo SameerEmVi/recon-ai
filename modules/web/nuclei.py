@@ -27,7 +27,8 @@ class NucleiModule(BaseModule):
 
     async def handle_event(self, event: Event) -> None:
         from recon.nuclei import NucleiWrapper
-        await NucleiWrapper(timeout=self.opt("timeout"), limiter=self.rate_limiter).scan(
+        await NucleiWrapper(timeout=self.opt("timeout"), limiter=self.rate_limiter,
+                            proxy_url=self.proxy_url).scan(
             event.data.url,
             self._ctrl.stamp_and_publish,
             scan_job_id=self._ctrl.scan_id,

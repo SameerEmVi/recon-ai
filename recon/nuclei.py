@@ -27,10 +27,11 @@ _NOT_FOUND_WARNED = False
 
 
 class NucleiWrapper:
-    def __init__(self, timeout: int = 180, limiter=None) -> None:
+    def __init__(self, timeout: int = 180, limiter=None, proxy_url: str | None = None) -> None:
         self._timeout = timeout
         from ratelimit import NOOP
         self._limiter = limiter if limiter is not None else NOOP
+        self._proxy_url = proxy_url
 
     async def scan(
         self,
@@ -50,6 +51,8 @@ class NucleiWrapper:
             "-no-interactsh",   # disable OAST/interactsh callbacks
             "-timeout", "10",
         ]
+        if self._proxy_url:
+            cmd += ["-proxy", self._proxy_url]   # route through Burp when configured
         log.debug("[nuclei] %s", " ".join(cmd))
 
         async with self._limiter.guard("nuclei"):

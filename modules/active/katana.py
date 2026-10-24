@@ -44,6 +44,8 @@ class KatanaModule(BaseModule):
         ]
         if self.opt("js_crawl"):
             cmd += ["-jc", "-js-crawl"]
+        if self.proxy_url:
+            cmd += ["-proxy", self.proxy_url]   # route crawl traffic through Burp
 
         self._log.info("katana crawling %s (depth=%s)", url, self.opt("depth"))
 

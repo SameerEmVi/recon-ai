@@ -196,6 +196,13 @@ class BaseModule(ABC):
         from diagnostics.logger import get_diagnostics
         return get_diagnostics(self._ctrl)
 
+    @property
+    def proxy_url(self) -> str | None:
+        """The active proxy URL, or None — for threading into external tools'
+        own proxy flags (nuclei -proxy, ffuf -x, katana -proxy …)."""
+        p = self.proxy
+        return p.url if p.active else None
+
     def http_client(self, **kwargs):
         """Build an httpx.AsyncClient pre-configured with the scan's proxy + TLS
         trust, so every module's traffic routes through Burp when enabled and no

@@ -265,6 +265,11 @@ setting and no module opens an unconfigured client — the former per-module
   (ProxyConnection/ProxyAuth/TLSVerification/DNS/ConnectTimeout/ReadTimeout/
   HTTPProtocol/ResponseParsing…). `fetch` classifies every failure, logs it, and
   returns `FetchResult(ok=False)` — never crashes a sibling module.
+- **External binaries too:** a configured proxy is threaded into the active
+  HTTP tools' own proxy flags — **nuclei** (`-proxy`), **ffuf** (`-x`), **katana**
+  (`-proxy`), **httpx**-PD (`-proxy`) — via `BaseModule.proxy_url` (and
+  `NucleiWrapper(proxy_url=…)`), so their traffic also appears in Burp. Port
+  scanners (naabu/rustscan) are excluded — a TCP scan isn't proxied.
 - **CLI:** `scan … --proxy http://127.0.0.1:8080 [--proxy-ca burp.pem] [--debug]`;
   `recon-ai diagnostics [<domain>] [--run-id] [--errors-only] [--module] [--export]`
   and `diagnostics --proxy-check <url>` (connectivity test, no scan). MCP
@@ -350,7 +355,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (845 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (849 tests, all passing) |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -433,5 +438,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 845 tests passing. See persistent memory
+module system + MCP). 849 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.
