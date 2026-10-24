@@ -231,6 +231,45 @@ fallback paths.
   unchanged (ceiling defaults to `active`, legacy selection applies) — fully
   backward-compatible. `--mode full` supersedes `--full`.
 
+## Outbound proxy (Burp) & structured diagnostics (`net/`, `diagnostics/`)
+
+All outbound HTTP is **httpx**, built through **`BaseModule.http_client()`** (and
+`BaseModule.fetch`), so routing every module's traffic through Burp is one
+setting and no module opens an unconfigured client — the former per-module
+`httpx.AsyncClient(...)` calls were migrated to `self.http_client(...)`.
+
+- **ProxyConfig** (`net/proxy.py`, one per scan, owned by `ScanController`,
+  exposed as `controller.proxy`): `{url, enabled, verify, ca_bundle, diagnostic}`.
+  Precedence CLI (`--proxy`/`--proxy-ca`) > env (`RECON_AI_PROXY`/`RECON_AI_PROXY_CA`)
+  > disabled. **TLS verification is never silently disabled** — `verify` defaults
+  True; a CA bundle (Burp's exported cert) is an explicit opt-in that sets
+  httpx `verify=<path>`. A module that must reach a broken-cert host (takeover)
+  passes `verify=False` through `http_client`, which **warns** (explicit, not
+  silent). `get_proxy(obj)` returns a disabled default under a mock controller.
+- **Fail-closed, no silent fallback:** an explicitly-configured proxy is
+  `probe()`d at scan start; if unreachable the scan **stops** with a
+  `ProxyConnectionError` rather than falling back to direct.
+- **Diagnostics** (`diagnostics/logger.py`, `controller.diagnostics`): per-run
+  JSONL under `results/<domain>/run-<id>/diagnostics/` — `events.jsonl` (all),
+  `errors.jsonl` (ERROR/CRITICAL), `http.jsonl` (one metadata record per
+  exchange — never bodies), `summary.json` (error counts by category/module).
+  **run_id** = scan id; **correlation_id** is a `contextvar` set per HTTP op, so
+  concurrent async tasks never mix context. Created when `--debug`, a proxy is
+  active, or results are enabled; unwritable dir degrades to no-op.
+- **Centralized redaction** (`net/redact.py`): every field is scrubbed before it
+  touches disk — secret headers (authorization/cookie/api-key…), URL userinfo +
+  sensitive query params, nested-JSON secret keys; messages are control-char
+  stripped (log-injection defense).
+- **Error taxonomy** (`net/errors.py`): `classify_http_error(exc)` →
+  `ErrorInfo(category, retryable, message)` over httpx/TLS/OS exceptions
+  (ProxyConnection/ProxyAuth/TLSVerification/DNS/ConnectTimeout/ReadTimeout/
+  HTTPProtocol/ResponseParsing…). `fetch` classifies every failure, logs it, and
+  returns `FetchResult(ok=False)` — never crashes a sibling module.
+- **CLI:** `scan … --proxy http://127.0.0.1:8080 [--proxy-ca burp.pem] [--debug]`;
+  `recon-ai diagnostics [<domain>] [--run-id] [--errors-only] [--module] [--export]`
+  and `diagnostics --proxy-check <url>` (connectivity test, no scan). MCP
+  `start_scan` takes a `proxy` arg. Burp setup is in INSTALL.md.
+
 ## Architecture (BBOT-style, event-driven)
 
 `Event` (12 types in `events/types.py`: SUBDOMAIN, DNS_RECORD, IP, OPEN_PORT,
@@ -307,9 +346,11 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `policy/` | Central mode & capability policy — maps modules/actions to capabilities and enforces the selected `--mode` (osint/active/vuln/full) at module load, the network primitives, and the agent tools. ScopeEngine stays the scope gate. |
 | `vulnscan/` | Evidence-based vulnerability assessment: `schema.py` (VulnResult + status/severity), `checks.py` (Check interface + native checks + registry), `cve.py` (version→CVE correlation, uncertainty-aware), `engine.py` (per-host context + tech-aware selection + isolation), `report.py` (JSON + human report). Driven by the `vulnassess` module. |
 | `normalize/` | Output parsers |
+| `net/` | Shared HTTP transport config: `proxy.py` (ProxyConfig — Burp/explicit proxy + TLS trust + `get_proxy`), `redact.py` (centralized secret/credential redaction), `errors.py` (error taxonomy + `classify_http_error`). Applied by `BaseModule.http_client()`/`fetch()`. |
+| `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (813 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (845 tests, all passing) |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -392,5 +433,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 813 tests passing. See persistent memory
+module system + MCP). 845 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.

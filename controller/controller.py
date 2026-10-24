@@ -71,6 +71,9 @@ class ScanController:
         out_dir: str = "results",
         # Live CLI event stream (off for MCP/background runs).
         live: bool = False,
+        # Outbound proxy (Burp) + structured diagnostics.
+        proxy=None,                 # net.proxy.ProxyConfig | None
+        debug: bool = False,        # enable verbose structured diagnostics
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -93,6 +96,11 @@ class ScanController:
         self._planner = ReconPlanner(
             PlannerConfig(mode=plan_mode, max_executions=plan_budget)
         )
+        self._out_dir = out_dir
+        from net.proxy import ProxyConfig
+        self._proxy = proxy if isinstance(proxy, ProxyConfig) else ProxyConfig()
+        self._debug = bool(debug)
+        self._diagnostics = None   # created in run() once the out dir is known
         self._aggregator = None
         if results_enabled:
             from output import ResultAggregator
@@ -316,6 +324,35 @@ class ScanController:
         print(ui.kv("mode", mode))
         print(ui.kv("seed", seed_domain))
         print(ui.kv("rate-lim", self._rate_limiter.describe()))
+        if self._proxy.active or self._debug:
+            print(ui.kv("proxy", self._proxy.describe()))
+
+        # Structured diagnostics for this run (once the out dir is known).
+        self._init_diagnostics(seed_domain)
+        diag = self._diagnostics
+        if diag is not None:
+            diag.event("INFO", "scan_start", module="controller", target=seed_domain,
+                       operation="run", mode=self._mode,
+                       ai=self._ai_enabled, agent=self._agent_enabled)
+
+        # Fail closed before any traffic: an explicitly-configured proxy that is
+        # unreachable must STOP the scan, never silently fall back to direct.
+        if self._proxy.active:
+            ok, pmsg = await self._proxy.probe()
+            print(ui.kv("proxy-check", pmsg))
+            if diag is not None:
+                diag.event("INFO" if ok else "ERROR",
+                           "proxy_check" if ok else "proxy_unreachable",
+                           module="controller", operation="proxy_probe",
+                           error_type=None if ok else "ProxyConnectionError",
+                           error_message=None if ok else pmsg)
+            if not ok:
+                from net.errors import ProxyConnectionError
+                if diag is not None:
+                    diag.summary(); diag.close()
+                raise ProxyConnectionError(
+                    f"configured proxy {self._proxy.url} is unreachable ({pmsg}); "
+                    f"refusing to run without it (no silent direct fallback)")
 
         if self._db_url:
             await self._init_db()
@@ -323,10 +360,18 @@ class ScanController:
         failed = False
         try:
             await self._do_run(seed_domain)
-        except BaseException:
+        except BaseException as exc:
             # BaseException so a cancelled/interrupted scan is not recorded as
             # complete either.
             failed = True
+            if diag is not None:
+                import traceback
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                diag.event("ERROR", "scan_cancelled" if cancelled else "scan_failed",
+                           module="controller", operation="run",
+                           error_type="UnexpectedError" if not cancelled else "Cancelled",
+                           error_message=str(exc),
+                           stack_trace=None if cancelled else traceback.format_exc())
             raise
         finally:
             if self._persister:
@@ -338,6 +383,17 @@ class ScanController:
                     await self._persister.scan_fail(self._scan_id)
                 else:
                     await self._persister.scan_end(self._scan_id, self._bus.seen_count)
+            if diag is not None:
+                if not failed:
+                    diag.event("INFO", "scan_complete", module="controller",
+                               operation="run", events=self._bus.seen_count)
+                s = diag.summary()
+                diag.close()
+                if s.get("total_errors"):
+                    print(ui.warn(f"diagnostics: {s['total_errors']} error(s) logged → "
+                                  f"{diag.directory}"))
+                elif self._debug:
+                    print(ui.info(f"diagnostics → {diag.directory}"))
 
         self.print_summary()
         from cli import ui
@@ -413,6 +469,17 @@ class ScanController:
         return self._policy
 
     @property
+    def proxy(self):
+        """The scan's outbound ProxyConfig (Burp/explicit proxy + TLS trust)."""
+        return self._proxy
+
+    @property
+    def diagnostics(self):
+        """The scan's DiagnosticsLogger (None until run() starts; NOOP via
+        diagnostics.get_diagnostics under a mock controller)."""
+        return self._diagnostics
+
+    @property
     def ai_enabled(self) -> bool:
         return self._ai_enabled
 
@@ -421,6 +488,26 @@ class ScanController:
         return self._agent_enabled
 
     # ── internals ─────────────────────────────────────────────────────────────
+
+    def _init_diagnostics(self, seed_domain: str) -> None:
+        """Create the per-run DiagnosticsLogger under results/<domain>/run-<id>/.
+
+        Created when results are enabled, debug is on, or a proxy is active —
+        otherwise left None (get_diagnostics yields the NOOP logger)."""
+        if not (self._aggregator is not None or self._debug or self._proxy.active):
+            return
+        import os
+        import re
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", seed_domain or "scan")[:80]
+        base = os.path.join(self._out_dir, safe, f"run-{self._scan_id}")
+        from diagnostics.logger import DiagnosticsLogger
+        try:
+            self._diagnostics = DiagnosticsLogger(
+                str(self._scan_id), base, proxy=self._proxy.describe(),
+                debug=self._debug)
+        except Exception as exc:  # never let diagnostics setup break a scan
+            log.warning("diagnostics disabled: %s", exc)
+            self._diagnostics = None
 
     async def _init_db(self) -> None:
         from database.persister import Persister

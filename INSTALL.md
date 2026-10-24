@@ -250,5 +250,45 @@ Exposes 8 tools: `start_scan`, `get_scan_status`, `list_scans`, `list_hosts`,
 | `--ai` / `--agent` "skipped" warning | Set `ANTHROPIC_API_KEY` **and** pass `--db-url`. |
 | Active modules find nothing on a bare domain | IPs are OOS by default; add `--in-scope <ip/CIDR>`. |
 
+## Routing traffic through Burp Suite
+
+Recon-AI can send all outbound HTTP(S) through a proxy so you can inspect it in
+Burp Proxy / HTTP history. TLS verification stays **on** — HTTPS interception
+requires trusting Burp's CA explicitly (never a silent downgrade).
+
+1. In Burp: **Proxy → Options**, confirm a listener on `127.0.0.1:8080`.
+2. Export Burp's CA: **Proxy → Options → Import / export CA certificate →
+   Certificate in DER/PEM**. Save it as e.g. `burp-ca.pem` (convert DER→PEM with
+   `openssl x509 -inform der -in cacert.der -out burp-ca.pem` if needed).
+3. Run with the proxy + CA:
+
+```bash
+# HTTP and HTTPS through Burp, verifying against Burp's CA:
+python -m cli.main scan example.com --mode active \
+  --proxy http://127.0.0.1:8080 --proxy-ca ./burp-ca.pem --debug
+
+# Or via environment (so you don't repeat it every run):
+export RECON_AI_PROXY=http://127.0.0.1:8080
+export RECON_AI_PROXY_CA=./burp-ca.pem
+python -m cli.main scan example.com --mode active --debug
+```
+
+4. Verify connectivity without scanning: `python -m cli.main diagnostics --proxy-check http://127.0.0.1:8080`.
+
+`--debug` writes structured diagnostics to
+`results/<domain>/run-<id>/diagnostics/` (`events.jsonl`, `errors.jsonl`,
+`http.jsonl`, `summary.json`). Inspect them with
+`python -m cli.main diagnostics <domain> [--errors-only] [--module <name>]` or
+bundle them with `--export`.
+
+**Common proxy failures**
+
+| Symptom | Cause / fix |
+|---|---|
+| `configured proxy … is unreachable` (scan stops) | Burp isn't listening / wrong port. Start Burp or fix `--proxy`. No silent direct fallback by design. |
+| `TLSVerificationError` on HTTPS | Burp's CA not trusted. Pass `--proxy-ca <burp-ca.pem>` (do **not** disable TLS). |
+| `ProxyAuthenticationError` | Upstream proxy needs creds; put them in the URL `http://user:pass@host:port` (redacted in logs). |
+| HTTPS pages show as errors in Burp | Re-export the current Burp CA; it rotates per Burp installation/project. |
+
 See [`CLAUDE.md`](CLAUDE.md) for the full architecture and machine-specific
 toolchain notes.

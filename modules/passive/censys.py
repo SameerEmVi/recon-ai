@@ -105,7 +105,7 @@ class CensysModule(BaseModule):
             # One Censys request at a time (rate-limit) + shared limiter spacing/WAF.
             async with self._lock:
                 async with self.guard("censys"):
-                    async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+                    async with self.http_client(timeout=self.opt("timeout")) as client:
                         r = await client.get(censys.host_url(ip), headers=headers)
             self.inspect_response(r)
             if r.status_code == 200:

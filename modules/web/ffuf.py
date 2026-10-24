@@ -178,7 +178,7 @@ class FfufModule(BaseModule):
 
         # 1. Learn the catch-all baseline through the shared limiter.
         headers = {"User-Agent": str(self.opt("user_agent"))}
-        async with httpx.AsyncClient(
+        async with self.http_client(
             timeout=float(self.opt("req_timeout")), headers=headers, verify=False
         ) as client:
             calib = await self._calibrate(client, base)

@@ -71,7 +71,7 @@ class WaybackModule(BaseModule):
         self._log.info("querying Wayback Machine for %s (limit=%s)", host, self.opt("limit"))
 
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard("wayback:web.archive.org"):
                     r = await client.get(url, params=params, follow_redirects=True)
                 r.raise_for_status()

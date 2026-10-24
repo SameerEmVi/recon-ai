@@ -224,7 +224,7 @@ class MetaScanModule(BaseModule):
         except ImportError:
             return None
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{urlparse(url).hostname or url}"):
                     r = await client.get(url, follow_redirects=True)
                 self.inspect_response(r)

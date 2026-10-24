@@ -347,7 +347,7 @@ class RelatedDomainsModule(BaseModule):
             ).items()
         }
 
-        async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+        async with self.http_client(timeout=self.opt("timeout")) as client:
             for d, src in (await self._external_sources(client, seed_root)).items():
                 cands.setdefault(d, set()).add(src)
             cands.pop(seed_root, None)

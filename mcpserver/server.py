@@ -136,12 +136,15 @@ async def _run_scan_bg(
     rate_limit: float | None,
     max_concurrency: int | None,
     mode: str,
+    proxy: str | None = None,
 ) -> None:
     """Background task that runs the full scan lifecycle."""
     from controller.controller import ScanController
+    from net.proxy import ProxyConfig
     from scope.types import Scope
 
     try:
+        proxy_cfg = ProxyConfig.from_sources(cli_proxy=proxy)
         scope = Scope.from_strings(
             in_scope=in_scope,
             out_scope=out_scope,
@@ -165,6 +168,7 @@ async def _run_scan_bg(
             max_agent_iterations=max_iterations,
             rate_limit=rate_limit,
             max_concurrency=max_concurrency,
+            proxy=proxy_cfg,
         )
         await controller.run(domain)
         complete_scan(scan_id, controller.bus.seen_count)
@@ -190,6 +194,7 @@ async def start_scan(
     rate_limit: float | None = None,
     max_concurrency: int | None = None,
     mode: str = "osint",
+    proxy: str | None = None,
 ) -> dict:
     """
     Start a reconnaissance scan against an authorized domain.
@@ -272,6 +277,7 @@ async def start_scan(
             rate_limit=rate_limit,
             max_concurrency=max_concurrency,
             mode=mode,
+            proxy=proxy,
         )
     )
     _scan_tasks.add(task)

@@ -36,7 +36,7 @@ class CrtShModule(BaseModule):
         self._log.info("querying crt.sh for %s", domain)
 
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{domain}"):
                     r = await client.get(url, follow_redirects=True)
                 r.raise_for_status()

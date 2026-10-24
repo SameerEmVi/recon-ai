@@ -40,7 +40,7 @@ class ChaosModule(BaseModule):
 
         self._log.info("querying Chaos for %s", domain)
         try:
-            async with httpx.AsyncClient(timeout=self.opt("timeout")) as client:
+            async with self.http_client(timeout=self.opt("timeout")) as client:
                 async with self.guard(f"http:{domain}"):
                     r = await client.get(url, headers=headers, follow_redirects=True)
                 r.raise_for_status()

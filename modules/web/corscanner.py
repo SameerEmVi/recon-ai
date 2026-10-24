@@ -59,7 +59,7 @@ class CorsScannerModule(BaseModule):
         ]
 
         try:
-            async with httpx.AsyncClient(
+            async with self.http_client(
                 timeout=self.opt("timeout"),
                 follow_redirects=False,
             ) as client:

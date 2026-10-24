@@ -184,6 +184,36 @@ class BaseModule(ABC):
         from policy import get_policy
         return get_policy(self._ctrl)
 
+    @property
+    def proxy(self):
+        """The scan's ProxyConfig (disabled default under a mock controller)."""
+        from net.proxy import get_proxy
+        return get_proxy(self._ctrl)
+
+    @property
+    def diagnostics(self):
+        """The scan's DiagnosticsLogger (NOOP under a mock controller)."""
+        from diagnostics.logger import get_diagnostics
+        return get_diagnostics(self._ctrl)
+
+    def http_client(self, **kwargs):
+        """Build an httpx.AsyncClient pre-configured with the scan's proxy + TLS
+        trust, so every module's traffic routes through Burp when enabled and no
+        module opens an unconfigured client.
+
+        Caller kwargs (timeout/headers/…) override the defaults. A caller that
+        explicitly passes verify=False keeps that (some checks must reach hosts
+        with broken certs) but it is WARNED, never silent — per the no-silent-
+        TLS-disable rule.
+        """
+        import httpx
+        base = self.proxy.client_kwargs()
+        if kwargs.get("verify") is False and base.get("verify") is not False:
+            self._log.warning(
+                "%s: verify=False — TLS verification disabled for this client "
+                "(explicit, not silent)", self.name)
+        return httpx.AsyncClient(**{**base, **kwargs})
+
     def guard(self, bucket: str | None = None):
         """Async context manager wrapping one network op with rate limiting.
 
@@ -274,35 +304,45 @@ class BaseModule(ABC):
             return FetchResult(url=url, ok=False, error=f"capability denied: {exc}")
 
         async def _do_fetch() -> "FetchResult":
-            try:
-                import httpx
-            except ImportError:
-                self._log.warning("httpx not installed")
-                return FetchResult(url=url, ok=False, error="httpx not installed")
-            try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with self.guard(f"http:{urlparse(url).hostname or url}"):
-                        r = await client.get(url, follow_redirects=follow_redirects)
-                    self.inspect_response(r)
-                    ctype = r.headers.get("content-type")
-                    size_kb = len(r.content) / 1024
-                    # Store the FULL body (up to the global ceiling); per-caller
-                    # max_body_kb is applied below so the first fetcher's cap does
-                    # not starve a later caller with a larger one.
-                    text = r.text if size_kb <= CACHE_MAX_BODY_KB else None
-                    return FetchResult(
-                        url=url,
-                        status_code=r.status_code,
-                        text=text,
-                        headers=dict(r.headers),
-                        content_type=ctype,
-                        ok=True,
-                        size_kb=size_kb,
-                        set_cookies=_set_cookie_list(r.headers),
-                    )
-            except Exception as exc:
-                self._log.debug("fetch failed for %s: %s", url, exc)
-                return FetchResult(url=url, ok=False, error=str(exc))
+            import time
+            from diagnostics.logger import correlation, new_correlation_id
+            from net.errors import classify_http_error
+            diag = self.diagnostics
+            verify = self.proxy.verify_value()
+            with correlation(new_correlation_id()):
+                start = time.monotonic()
+                try:
+                    async with self.http_client(timeout=timeout) as client:
+                        async with self.guard(f"http:{urlparse(url).hostname or url}"):
+                            r = await client.get(url, follow_redirects=follow_redirects)
+                        self.inspect_response(r)
+                        ctype = r.headers.get("content-type")
+                        size_kb = len(r.content) / 1024
+                        # Store the FULL body (up to the global ceiling); per-caller
+                        # max_body_kb is applied below so the first fetcher's cap does
+                        # not starve a later caller with a larger one.
+                        text = r.text if size_kb <= CACHE_MAX_BODY_KB else None
+                        diag.http(module=self.name, operation="fetch", method="GET",
+                                  url=url, status=r.status_code,
+                                  duration_ms=(time.monotonic() - start) * 1000,
+                                  response_bytes=len(r.content), verify=verify)
+                        return FetchResult(
+                            url=url,
+                            status_code=r.status_code,
+                            text=text,
+                            headers=dict(r.headers),
+                            content_type=ctype,
+                            ok=True,
+                            size_kb=size_kb,
+                            set_cookies=_set_cookie_list(r.headers),
+                        )
+                except Exception as exc:
+                    info = classify_http_error(exc)
+                    diag.http(module=self.name, operation="fetch", method="GET",
+                              url=url, duration_ms=(time.monotonic() - start) * 1000,
+                              verify=verify, error=info.as_dict())
+                    self._log.debug("fetch failed for %s: %s", url, info.message)
+                    return FetchResult(url=url, ok=False, error=info.message)
 
         def _apply_cap(res: "FetchResult") -> "FetchResult":
             # Hide the body from THIS caller if it exceeds the caller's cap; the
