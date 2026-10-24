@@ -355,7 +355,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (849 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (850 tests, all passing) |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -438,5 +438,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 849 tests passing. See persistent memory
+module system + MCP). 850 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.

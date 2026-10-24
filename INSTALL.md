@@ -287,6 +287,9 @@ bundle them with `--export`.
 |---|---|
 | `configured proxy … is unreachable` (scan stops) | Burp isn't listening / wrong port. Start Burp or fix `--proxy`. No silent direct fallback by design. |
 | `TLSVerificationError` on HTTPS | Burp's CA not trusted. Pass `--proxy-ca <burp-ca.pem>` (do **not** disable TLS). |
+| `CA cert does not include key usage extension` | This Burp's CA predates the `keyUsage` extension that modern OpenSSL requires. Regenerate Burp's CA (Settings → TLS → regenerate), **or** for local testing use `--proxy-insecure` (explicit, logged — not a silent bypass). |
+| Grab Burp's CA quickly | With the proxy running: `curl -x http://127.0.0.1:8080 http://burp/cert -o burp-ca.der && openssl x509 -inform der -in burp-ca.der -out burp-ca.pem`. |
+| External tools (nuclei/ffuf/httpx) show TLS errors in Burp | Those Go tools do their own TLS and don't read `--proxy-ca`; trust Burp's CA in the OS store, or they fall back to their own lenient behaviour. The `--proxy`/`-x` flags still route them through Burp. |
 | `ProxyAuthenticationError` | Upstream proxy needs creds; put them in the URL `http://user:pass@host:port` (redacted in logs). |
 | HTTPS pages show as errors in Burp | Re-export the current Burp CA; it rotates per Burp installation/project. |
 

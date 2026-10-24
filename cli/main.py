@@ -244,6 +244,12 @@ def scan(
         help="Path to the proxy's CA bundle (PEM) for HTTPS interception, e.g. Burp's "
              "exported CA (or set RECON_AI_PROXY_CA). Explicit opt-in; never disables TLS.",
     ),
+    proxy_insecure: bool = typer.Option(
+        False, "--proxy-insecure",
+        help="Disable TLS verification for proxied traffic (local Burp testing only, "
+             "e.g. when Burp's CA lacks the keyUsage extension). Explicit + logged, "
+             "never silent. Prefer --proxy-ca with a valid CA.",
+    ),
     debug: bool = typer.Option(
         False, "--debug",
         help="Write verbose structured diagnostics (events/errors/http JSONL) under "
@@ -295,10 +301,14 @@ def scan(
     from net.proxy import ProxyConfig
     try:
         proxy_cfg = ProxyConfig.from_sources(
-            cli_proxy=proxy, cli_ca=proxy_ca, diagnostic=debug)
+            cli_proxy=proxy, cli_ca=proxy_ca,
+            cli_verify=False if proxy_insecure else None, diagnostic=debug)
     except ConfigurationError as exc:
         typer.echo(f"[error] proxy configuration: {exc}", err=True)
         raise typer.Exit(code=1)
+    if proxy_cfg.active and not proxy_cfg.verify and not proxy_cfg.ca_bundle:
+        typer.echo(ui.warn("TLS verification DISABLED for proxied traffic "
+                           "(--proxy-insecure) — local testing only"))
 
     ai_effective = ai or agent
 

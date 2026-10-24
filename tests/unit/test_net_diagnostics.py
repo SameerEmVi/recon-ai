@@ -123,6 +123,16 @@ def test_proxy_missing_ca_raises():
                                  cli_ca="/no/such/ca.pem")
 
 
+def test_proxy_insecure_disables_verify_explicitly():
+    # --proxy-insecure → verify off (explicit; for Burp CAs that strict OpenSSL
+    # rejects, e.g. missing keyUsage). Never the silent default.
+    p = ProxyConfig.from_sources(cli_proxy="http://127.0.0.1:8080", cli_verify=False)
+    assert p.active and p.client_kwargs()["verify"] is False
+    assert "verify=OFF" in p.describe()
+    # Default stays ON.
+    assert ProxyConfig.from_sources(cli_proxy="http://127.0.0.1:8080").verify is True
+
+
 def test_proxy_ca_bundle_sets_verify_to_path(tmp_path):
     ca = tmp_path / "burp.pem"
     ca.write_text("---CERT---", encoding="utf-8")
