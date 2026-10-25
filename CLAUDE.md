@@ -87,7 +87,14 @@ discovery instead of blindly firing every module on every matching event. It
   preserves prior behaviour), `aggressive` (higher caps/budget). CLI:
   `--plan-mode`, `--budget` (max total executions).
 - **Loop prevention / dedup:** per-(module,host) cap (mode-scaled) on top of the
-  scope distance bound and bus event-dedup.
+  scope distance bound and bus event-dedup. The cap is **cost-aware**: expensive
+  active modules (cost ≥ HIGH — ffuf/nuclei/katana/port scanners) get the mode
+  base (default 60), while cheap analysis/body-reader modules (cost < HIGH —
+  secretfinder/js_intel/metascan/retirejs/apifinder/linkfinder/paramfinder/
+  jsluice) get `_ANALYSIS_CAP_MULT`× that (default ×50 = 3000), so they aren't
+  starved on content-heavy hosts — otherwise a real secret/email/vuln on an
+  un-fetched page appears in one run and vanishes the next. An explicit
+  `--budget`/`per_host_cap` override still wins for every module.
 - **Explainability:** every decision carries a reason ("run graphql on api.x.com
   because technology 'graphql' present"); `planner.explain()` / `planner.stats`
   summarize selections + skip reasons, printed in the SCAN SUMMARY when the
@@ -356,7 +363,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (876 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (878 tests, all passing) |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
 Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
@@ -439,5 +446,5 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 876 tests passing. See persistent memory
+module system + MCP). 878 tests passing. See persistent memory
 `project-recon-ai` and `reference-toolchain-env` for the fuller record.
