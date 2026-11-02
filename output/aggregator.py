@@ -78,6 +78,36 @@ _META_AUTHOR_RE = re.compile(r"\b(?:author|creator|last_modified_by|artist)=([^;
 _URL_IN_TEXT_RE = re.compile(r"(?:source map referenced:|referenced:)\s*(\S+)", re.I)
 
 
+def _compile_kw(keywords) -> re.Pattern:
+    """Compile a keyword set into one alternation that matches a keyword only on
+    alphanumeric boundaries — so 'sso' matches '/sso/' but NOT 'accessories',
+    'test' matches 'test.x' but NOT 'latest', 'auth' NOT 'author'. A boundary is
+    asserted only on an edge that is itself alphanumeric, so prefix/suffix-style
+    keywords with a separator ('dev.', 'wp-admin', '.git', 'account/login') still
+    match. This replaces the old `any(kw in path)` substring test, which produced
+    ~84% false positives in interesting.txt on a retail catalogue full of
+    '…/accessories' paths."""
+    parts = []
+    for kw in keywords:
+        k = kw.lower()
+        lead = r"(?<![a-z0-9])" if k[:1].isalnum() else ""
+        trail = r"(?![a-z0-9])" if k[-1:].isalnum() else ""
+        parts.append(lead + re.escape(k) + trail)
+    return re.compile("|".join(parts))
+
+
+# Boundary-aware matchers for the substring-position keyword sets (membership
+# tests like `name in _INTERESTING_PARAMS` are exact and need no change).
+_LOGIN_RE = _compile_kw(_LOGIN_KW)
+_ADMIN_RE = _compile_kw(_ADMIN_KW)
+_UPLOAD_RE = _compile_kw(_UPLOAD_KW)
+_DEBUG_RE = _compile_kw(_DEBUG_KW)
+_DEV_RE = _compile_kw(_DEV_KW)
+_CONFIG_RE = _compile_kw(_CONFIG_HINTS)
+_INTERNAL_RE = _compile_kw(_INTERNAL_HOST_KW)
+_LOGIN_ADMIN_RE = _compile_kw(_LOGIN_KW + _ADMIN_KW)
+
+
 def _norm_url(url: str) -> str:
     try:
         p = urlparse(url.strip())
@@ -146,6 +176,27 @@ class ResultAggregator:
         # the vulnassess module (mirrors attach_intelligence — one writer).
         self._vuln: dict | None = None
 
+        # Live writing: `_dirty` flips True on every observe() so the periodic
+        # live writer only re-renders when something changed. `_baseline_domains`
+        # snapshots the PREVIOUS latest/ at scan start so the end-of-scan domain
+        # diff is correct even though live writing overwrites latest/ during the run.
+        self._dirty: bool = True
+        self._baseline_domains: set[str] | None = None
+
+    def prime_baseline(self, domain: str) -> None:
+        """Snapshot the previous scan's domains BEFORE any live write overwrites
+        latest/, so write()'s diff compares against the real prior scan. Call once
+        at scan start. Safe if there's no prior scan (baseline = empty)."""
+        domain = (domain or "unknown").lower().strip("/") or "unknown"
+        prev = os.path.join(self._out_dir, domain, "latest", "domains.txt")
+        try:
+            self._baseline_domains = (
+                set(open(prev, encoding="utf-8").read().split())
+                if os.path.isfile(prev) else set()
+            )
+        except OSError:
+            self._baseline_domains = set()
+
     def new_domains_vs_latest(self, domain: str) -> list[str]:
         """Subdomains not present in the previous `latest/` scan — the current-vs-
         historical delta the intelligence layer correlates. [] if no prior scan."""
@@ -181,6 +232,7 @@ class ResultAggregator:
             return
         tool = getattr(event, "source_tool", "") or "unknown"
         self.sources.add(tool)
+        self._dirty = True   # a live-writer flush is now worthwhile
         try:
             self._dispatch(etype, d, tool)
         except Exception as exc:
@@ -352,7 +404,7 @@ class ResultAggregator:
     def _login_pages(self):
         out = set()
         for u in set(self.urls) | set(self.live) | set(self.endpoints):
-            if any(k in urlparse(u).path.lower() for k in _LOGIN_KW):
+            if _LOGIN_RE.search(urlparse(u).path.lower()):
                 out.add(u); continue
             meta = self.live.get(u)
             if meta and meta.get("title") and any(k in meta["title"].lower()
@@ -378,19 +430,19 @@ class ResultAggregator:
         sec = defaultdict(set)
         for u in set(self.urls) | set(self.live) | set(self.endpoints):
             path = urlparse(u).path.lower(); host = _host_of(u)
-            if any(k in path for k in _LOGIN_KW): sec["LOGIN"].add(u)
-            if any(k in path for k in _ADMIN_KW) or host.startswith(("admin.", "manage.")): sec["ADMIN"].add(u)
+            if _LOGIN_RE.search(path): sec["LOGIN"].add(u)
+            if _ADMIN_RE.search(path) or host.startswith(("admin.", "manage.")): sec["ADMIN"].add(u)
             if classify_api(u): sec["API"].add(u)
-            if any(k in path for k in _UPLOAD_KW): sec["UPLOAD"].add(u)
-            if any(k in path for k in _DEBUG_KW): sec["DEBUG"].add(u)
-            if any(k in u.lower() for k in _DEV_KW): sec["DEV/STAGING"].add(u)
+            if _UPLOAD_RE.search(path): sec["UPLOAD"].add(u)
+            if _DEBUG_RE.search(path): sec["DEBUG"].add(u)
+            if _DEV_RE.search(u.lower()): sec["DEV/STAGING"].add(u)
             if _ext_of(u) in _DOC_EXTS: sec["DOCUMENT"].add(u)
-            if any(h in u.lower() for h in _CONFIG_HINTS): sec["CONFIGURATION"].add(u)
+            if _CONFIG_RE.search(u.lower()): sec["CONFIGURATION"].add(u)
         for base, names in self.params.items():
             hit = sorted(n for n in names if n.lower() in _INTERESTING_PARAMS)
             if hit: sec["INTERESTING PARAMETER"].add(base + "?" + "&".join(f"{n}=" for n in hit))
         for h in self.domains:
-            if any(k in h for k in _DEV_KW): sec["DEV/STAGING"].add(h)
+            if _DEV_RE.search(h): sec["DEV/STAGING"].add(h)
         for a in self.anomalies:
             if a.get("category") in ("cloud-asset", "exposed-source-map", "subdomain-takeover", "host-org"):
                 sec["NOTABLE"].add(f"[{a.get('category')}] {a['host']}: {a['description'][:100]}")
@@ -458,8 +510,8 @@ class ResultAggregator:
         return imgs, meta
 
     def _data_exposure(self):
-        internal = sorted(h for h in self.domains if any(k in h for k in _INTERNAL_HOST_KW))
-        config = sorted(u for u in self.urls if any(k in u.lower() for k in _CONFIG_HINTS)
+        internal = sorted(h for h in self.domains if _INTERNAL_RE.search(h))
+        config = sorted(u for u in self.urls if _CONFIG_RE.search(u.lower())
                         or _ext_of(u) in {".env", ".config", ".conf", ".ini", ".yaml", ".yml"})
         interesting_files = sorted(u for u in self.urls if _ext_of(u) in _SENSITIVE_FILE_EXTS)
         return {
@@ -567,8 +619,8 @@ class ResultAggregator:
             "javascript/sourcemaps.txt": sorted(self.source_maps),
             "wayback/urls.txt": self._urls_by_source("wayback"),
             "wayback/interesting.txt": [u for u in self._urls_by_source("wayback")
-                                        if classify_api(u) or any(k in urlparse(u).path.lower()
-                                        for k in _LOGIN_KW + _ADMIN_KW)],
+                                        if classify_api(u)
+                                        or _LOGIN_ADMIN_RE.search(urlparse(u).path.lower())],
             "wayback/parameters.txt": self._params_from_sources("wayback"),
             "secrets/findings.txt": secret_txt,
             "secrets/findings.json": json.dumps(secret_json, indent=2, ensure_ascii=False),
@@ -585,6 +637,39 @@ class ResultAggregator:
                 "vulnerabilities.json": self._vuln["json"]} if self._vuln else {}),
         }
 
+    def _render_tree_to(self, out_dir: str, domain: str) -> None:
+        """Write the full categorized tree (+ provenance) into `out_dir`,
+        overwriting in place. Shared by write() (history snapshot) and
+        write_live() (the live latest/ snapshot)."""
+        os.makedirs(out_dir, exist_ok=True)
+        for rel, content in self._tree(domain).items():
+            path = os.path.join(out_dir, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if isinstance(content, str):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content + ("\n" if not content.endswith("\n") else ""))
+            else:
+                self._write_lines(path, content)
+        self._write_provenance(os.path.join(out_dir, "provenance.jsonl"))
+
+    def write_live(self, domain: str, *, force: bool = False) -> str | None:
+        """Overwrite results/<domain>/latest/ IN PLACE with the current tree so
+        results populate live during a scan (and a stopped/killed scan still
+        leaves an up-to-date snapshot). Cheap — no history snapshot or diff.
+        Skips the render when nothing changed since the last flush. Never raises;
+        returns the latest dir if it wrote, else None."""
+        if not force and not self._dirty:
+            return None
+        domain = (domain or "unknown").lower().strip("/") or "unknown"
+        latest_dir = os.path.join(self._out_dir, domain, "latest")
+        try:
+            self._render_tree_to(latest_dir, domain)
+            self._dirty = False
+            return latest_dir
+        except Exception as exc:
+            log.debug("write_live failed: %s", exc)
+            return None
+
     def write(self, domain: str) -> str:
         domain = (domain or "unknown").lower().strip("/") or "unknown"
         ts = self._started_at.strftime("%Y-%m-%d_%H%M%S")
@@ -600,15 +685,7 @@ class ResultAggregator:
 
         diff_text = self._diff_vs_latest(latest_dir)
 
-        for rel, content in self._tree(domain).items():
-            path = os.path.join(scan_dir, rel)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            if isinstance(content, str):
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(content + ("\n" if not content.endswith("\n") else ""))
-            else:
-                self._write_lines(path, content)
-        self._write_provenance(os.path.join(scan_dir, "provenance.jsonl"))
+        self._render_tree_to(scan_dir, domain)
 
         if os.path.isdir(latest_dir):
             shutil.rmtree(latest_dir, ignore_errors=True)
@@ -616,16 +693,25 @@ class ResultAggregator:
         if diff_text:
             self._write_lines(os.path.join(diff_dir, f"{ts}.txt"), diff_text)
 
+        self._dirty = False
         log.info("results written to %s (mirrored to latest/)", scan_dir)
         return scan_dir
 
     def _diff_vs_latest(self, latest_dir: str):
-        prev = os.path.join(latest_dir, "domains.txt")
-        if not os.path.isfile(prev):
-            return None
-        try:
-            old = set(open(prev, encoding="utf-8").read().split())
-        except Exception:
+        # Prefer the baseline snapshotted at scan start (prime_baseline) — during
+        # a live-writing scan, latest/ has already been overwritten with THIS
+        # run's data, so reading it would diff a run against itself.
+        if self._baseline_domains is not None:
+            old = self._baseline_domains
+        else:
+            prev = os.path.join(latest_dir, "domains.txt")
+            if not os.path.isfile(prev):
+                return None
+            try:
+                old = set(open(prev, encoding="utf-8").read().split())
+            except Exception:
+                return None
+        if not old:
             return None
         new, gone = self.domains - old, old - self.domains
         lines = [f"# domain diff vs previous latest ({len(old)} -> {len(self.domains)})", "",
