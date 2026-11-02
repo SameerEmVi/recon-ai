@@ -21,6 +21,7 @@ from database.models import (
     EventRecord,
     Finding,
     Host,
+    JobRecord,
     ScanJob,
     VocabularyItem,
     VocabularyTarget,
@@ -272,6 +273,71 @@ class FindingRepository:
             .where(Finding.scan_job_id == scan_id)
             .order_by(Finding.category, Finding.host)
         )
+        return list(result.scalars())
+
+
+# ── JobRepository (hybrid scanning engine — job lifecycle persistence) ──────────
+
+class JobRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def upsert(self, record: JobRecord) -> JobRecord:
+        """Insert a job, or update the existing row for (scan, dedup_key) — so a
+        job's lifecycle is a single evolving row, never duplicated."""
+        existing = await self.get(record.scan_job_id, record.dedup_key)
+        if existing is None:
+            self._s.add(record)
+            try:
+                await self._s.commit()
+            except IntegrityError:
+                # Concurrent insert of the same unit of work — fall back to update.
+                await self._s.rollback()
+                existing = await self.get(record.scan_job_id, record.dedup_key)
+                if existing is None:
+                    raise
+            else:
+                await self._s.refresh(record)
+                return record
+        # update the mutable lifecycle fields on the existing row
+        existing.state = record.state
+        existing.priority = record.priority
+        existing.parent_job_id = record.parent_job_id
+        existing.correlation_id = record.correlation_id
+        existing.error = record.error
+        existing.result = record.result
+        existing.updated_at = record.updated_at
+        await self._s.commit()
+        await self._s.refresh(existing)
+        return existing
+
+    async def set_state(self, scan_id: UUID, dedup_key: str, state: str,
+                        *, error: str | None = None) -> None:
+        values: dict = {"state": state, "updated_at": datetime.now(UTC)}
+        if error is not None:
+            values["error"] = error
+        await self._s.execute(
+            update(JobRecord)
+            .where(JobRecord.scan_job_id == scan_id, JobRecord.dedup_key == dedup_key)
+            .values(**values)
+        )
+        await self._s.commit()
+
+    async def get(self, scan_id: UUID, dedup_key: str) -> JobRecord | None:
+        result = await self._s.execute(
+            select(JobRecord).where(
+                JobRecord.scan_job_id == scan_id,
+                JobRecord.dedup_key == dedup_key,
+            )
+        )
+        return result.scalars().first()
+
+    async def list_for_scan(self, scan_id: UUID, *, state: str | None = None) -> list[JobRecord]:
+        stmt = select(JobRecord).where(JobRecord.scan_job_id == scan_id)
+        if state is not None:
+            stmt = stmt.where(JobRecord.state == state)
+        stmt = stmt.order_by(JobRecord.priority, JobRecord.created_at)
+        result = await self._s.execute(stmt)
         return list(result.scalars())
 
 

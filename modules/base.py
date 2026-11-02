@@ -219,6 +219,12 @@ class BaseModule(ABC):
             self._log.warning(
                 "%s: verify=False — TLS verification disabled for this client "
                 "(explicit, not silent)", self.name)
+        # Browser header profile (None under a mock controller / 'off'). Merge it
+        # UNDER any caller-supplied headers so an explicit per-call header wins.
+        from net.headers import get_headers
+        profile = get_headers(self._ctrl)
+        if profile is not None:
+            kwargs = {**kwargs, "headers": {**profile.as_dict(), **(kwargs.get("headers") or {})}}
         return httpx.AsyncClient(**{**base, **kwargs})
 
     def guard(self, bucket: str | None = None):

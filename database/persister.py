@@ -13,8 +13,15 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Finding
-from database.repository import AiAssessmentRepository, EventRepository, FindingRepository, HostRepository, ScanRepository
+from database.models import Finding, JobRecord
+from database.repository import (
+    AiAssessmentRepository,
+    EventRepository,
+    FindingRepository,
+    HostRepository,
+    JobRepository,
+    ScanRepository,
+)
 from events.types import Event, EventType
 
 log = logging.getLogger(__name__)
@@ -28,6 +35,7 @@ class Persister:
         self._host_repo = HostRepository(session)
         self._finding_repo = FindingRepository(session)
         self._assessment_repo = AiAssessmentRepository(session)
+        self._job_repo = JobRepository(session)
         # A single AsyncSession is NOT safe for concurrent use. The controller
         # fires save_event() as many parallel background tasks, so every write
         # must be serialized through this lock — otherwise overlapping commit()/
@@ -69,6 +77,21 @@ class Persister:
     async def scan_fail(self, scan_id: UUID) -> None:
         async with self._lock:
             await self._scan_repo.fail(scan_id)
+
+    # ── hybrid scheduler: job lifecycle persistence ───────────────────────────
+    async def save_job(self, job) -> None:
+        """Persist/refresh one scheduler Job's lifecycle row (serialized, never
+        raises into the scan loop — a persistence hiccup can't stop scanning)."""
+        async with self._lock:
+            try:
+                await self._job_repo.upsert(JobRecord.from_job(job))
+            except Exception as exc:
+                log.debug("db: save_job failed (%s) — rolling back", exc)
+                await self._session.rollback()
+
+    async def list_jobs(self, scan_id: UUID, *, state: str | None = None) -> list[JobRecord]:
+        async with self._lock:
+            return await self._job_repo.list_for_scan(scan_id, state=state)
 
     # ── host table maintenance ─────────────────────────────────────────────────
 

@@ -212,3 +212,110 @@ async def test_bare_503_does_not_back_off_limiter():
         lim.observe_http(status=503, headers={"server": "nginx"})
     assert lim.penalty == 1.0            # no backoff
     assert lim._base_interval > 0        # unchanged from its static rate
+
+
+# ── parallel-engine extensions ────────────────────────────────────────────────
+# (global rps/burst · per-target concurrency · per-target cooldown · Retry-After)
+
+async def test_global_rate_bounds_aggregate_across_buckets():
+    """The spec's hard rule: a worker count can't multiply the request budget.
+    Many concurrent ops across DIFFERENT buckets must still obey the aggregate
+    global rps, not just per-bucket spacing."""
+    rate, burst, n = 20.0, 1, 24
+    lim = RateLimiter(global_rate_per_sec=rate, burst=burst)
+
+    async def op(i):
+        async with lim.guard(bucket=f"host{i}"):   # every op a distinct bucket
+            pass
+
+    t0 = time.monotonic()
+    await asyncio.gather(*(op(i) for i in range(n)))
+    elapsed = time.monotonic() - t0
+    # n tokens at `rate`/s with `burst` free ⇒ at least (n-burst)/rate seconds.
+    floor = (n - burst) / rate
+    assert elapsed >= floor * 0.9, f"aggregate rate exceeded: {elapsed:.3f}s < {floor:.3f}s"
+
+
+async def test_burst_allows_initial_then_paces():
+    lim = RateLimiter(global_rate_per_sec=5.0, burst=5)
+    t0 = time.monotonic()
+    for _ in range(5):                               # burst of 5 → ~immediate
+        async with lim.guard(bucket="x"):
+            pass
+    assert time.monotonic() - t0 < 0.2
+
+
+async def test_per_target_concurrency_caps_one_host_not_others():
+    import asyncio as _a
+    lim = RateLimiter(per_target_concurrency=2)
+    active = {"a": 0}
+    peak = {"a": 0}
+
+    async def op(host, hold=0.05):
+        async with lim.guard(bucket=host):
+            if host == "a":
+                active["a"] += 1
+                peak["a"] = max(peak["a"], active["a"])
+                await _a.sleep(hold)
+                active["a"] -= 1
+            else:
+                await _a.sleep(hold)
+
+    await _a.gather(*([op("a") for _ in range(6)] + [op("b") for _ in range(6)]))
+    assert peak["a"] <= 2                            # host 'a' never exceeded its cap
+
+
+async def test_per_target_cooldown_isolates_blocked_target():
+    lim = RateLimiter()
+    # a 429 with Retry-After on host 'a' only
+    lim.observe_http(status=429, headers={"retry-after": "1"}, bucket="a")
+    # 'a' is in cooldown; 'b' is not
+    snap = lim.stats()
+    assert "a" in snap["targets_in_cooldown"]
+    assert "b" not in snap["targets_in_cooldown"]
+
+    # 'b' passes through immediately; 'a' is delayed by the cooldown
+    t0 = time.monotonic()
+    async with lim.guard(bucket="b"):
+        pass
+    assert time.monotonic() - t0 < 0.3
+
+
+async def test_retry_after_seconds_sets_cooldown_delay():
+    lim = RateLimiter()
+    lim.observe_http(status=429, headers={"Retry-After": "0.0"}, bucket="a")  # 0 → no delay
+    # a real small delay is honoured
+    lim._set_cooldown("a", 0.3)
+    t0 = time.monotonic()
+    async with lim.guard(bucket="a"):
+        pass
+    assert time.monotonic() - t0 >= 0.25
+
+
+def test_retry_after_parse_http_date_and_cap():
+    # delta-seconds
+    assert RateLimiter._retry_after_seconds(429, {"retry-after": "30"}) == 30.0
+    # non-429/503 ignored
+    assert RateLimiter._retry_after_seconds(200, {"retry-after": "30"}) is None
+    # garbage → None
+    assert RateLimiter._retry_after_seconds(429, {"retry-after": "soon"}) is None
+
+
+async def test_per_target_backoff_does_not_touch_global_penalty():
+    lim = RateLimiter(rate_per_sec=10)
+    lim.observe_http(status=403, headers={"x-iinfo": "1"}, bucket="a")   # WAF-product block on 'a'
+    assert lim.penalty == 1.0                        # scan-wide penalty untouched
+    assert "a" in lim.stats()["targets_backed_off"]
+
+
+async def test_extensions_are_opt_in_and_noop_frozen():
+    # unconfigured limiter: new paths are inert
+    lim = RateLimiter()
+    assert lim.global_rate_per_sec is None and lim.per_target_concurrency is None
+    t0 = time.monotonic()
+    async with lim.guard(bucket="x"):
+        pass
+    assert time.monotonic() - t0 < 0.05
+    # frozen NOOP never adapts, even per-bucket
+    NOOP.observe_http(status=429, headers={"retry-after": "100"}, bucket="a")
+    assert NOOP.stats()["targets_in_cooldown"] == []
