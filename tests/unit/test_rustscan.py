@@ -164,20 +164,26 @@ async def test_wrapper_missing_binary_returns_empty():
 
 async def test_wrapper_timeout_returns_empty_and_kills():
     proc = _fake_proc(hang=True)
+    term = AsyncMock()
     with patch("recon.rustscan.asyncio.create_subprocess_exec",
-               AsyncMock(return_value=proc)):
+               AsyncMock(return_value=proc)), \
+         patch("recon.proc.terminate_tree", term):
         res = await RustScanWrapper(run_timeout=1).scan("10.0.0.5")
     assert res == {}
-    proc.kill.assert_called_once()
+    # cleanup now goes through the shared tree-killer (kills + reaps, and
+    # never raises ProcessLookupError on an already-exited process)
+    term.assert_awaited_once()
 
 
 async def test_wrapper_cancellation_propagates():
     proc = _fake_proc(cancel=True)
+    term = AsyncMock()
     with patch("recon.rustscan.asyncio.create_subprocess_exec",
-               AsyncMock(return_value=proc)):
+               AsyncMock(return_value=proc)), \
+         patch("recon.proc.terminate_tree", term):
         with pytest.raises(asyncio.CancelledError):
             await RustScanWrapper().scan("10.0.0.5")
-    proc.kill.assert_called_once()
+    term.assert_awaited_once()
 
 
 async def test_wrapper_nonzero_exit_no_output_is_empty():

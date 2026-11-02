@@ -65,6 +65,55 @@ async def test_controller_accepts_in_scope_seed():
     do_run.assert_awaited_once_with("target.com")
 
 
+async def test_seed_module_exception_does_not_abort_scan():
+    """Regression: a seed module raising (e.g. a subprocess-cleanup
+    ProcessLookupError on a timeout-race, as assetfinder did against a
+    Cloudflare-fronted target) must be isolated by the seed gather, not crash
+    the whole scan. Exactly the bug that killed the live run."""
+    from controller.controller import ScanController
+
+    ctrl = ScanController(_scope(["*.target.com", "target.com"]), results_enabled=False)
+
+    boom = MagicMock()
+    boom.name = "boom"
+    boom.run = AsyncMock(side_effect=ProcessLookupError())
+    boom.finish = AsyncMock()
+
+    ctrl._loaded_modules = [boom]
+    with patch.object(ctrl, "_load_and_setup_modules", new=AsyncMock(return_value=([boom], []))), \
+         patch.object(ctrl._planner, "allow_seed", return_value=MagicMock(run=True)):
+        # Must complete without raising — the ProcessLookupError is captured.
+        await ctrl._do_run("target.com")
+
+    boom.run.assert_awaited_once()
+    boom.finish.assert_awaited_once()
+
+
+async def test_results_flushed_when_scan_interrupted(tmp_path):
+    """Regression: a stopped/interrupted scan must still write its result tree
+    (write() now lives in run()'s finally), and the live writer is primed/started
+    up front. Previously an interrupt lost the whole aggregator output."""
+    from controller.controller import ScanController
+
+    ctrl = ScanController(_scope(["*.target.com", "target.com"]),
+                          results_enabled=True, out_dir=str(tmp_path))
+    agg = ctrl._aggregator
+    agg.prime_baseline = MagicMock()
+    agg.write_live = MagicMock(return_value=None)
+    agg.write = MagicMock(return_value=str(tmp_path / "target.com" / "scans" / "x"))
+
+    async def boom(_seed):
+        raise KeyboardInterrupt()          # simulate Ctrl-C mid-scan
+
+    with patch.object(ctrl, "_do_run", new=boom), \
+         patch.object(ctrl, "print_summary"):
+        with pytest.raises(KeyboardInterrupt):
+            await ctrl.run("target.com")
+
+    agg.prime_baseline.assert_called_once()   # diff baseline captured at start
+    agg.write.assert_called_once()            # results flushed DESPITE the interrupt
+
+
 def test_cli_rejects_out_of_scope_seed():
     from typer.testing import CliRunner
 

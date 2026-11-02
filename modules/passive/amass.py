@@ -49,7 +49,8 @@ class AmassModule(BaseModule):
                 proc.communicate(), timeout=self.opt("timeout")
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            from recon.proc import terminate_tree
+            await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
             self._log.warning("amass timed out after %ds", self.opt("timeout"))
             return
 

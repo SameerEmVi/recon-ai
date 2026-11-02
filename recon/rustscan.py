@@ -280,20 +280,14 @@ class RustScanWrapper:
                     proc.communicate(), timeout=self._run_timeout
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:  # pragma: no cover
-                    pass
+                from recon.proc import terminate_tree
+                await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
                 log.warning("[rustscan] timed out after %ds on %s",
                             self._run_timeout, target)
                 return {}
             except asyncio.CancelledError:
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:  # pragma: no cover
-                    pass
+                from recon.proc import terminate_tree
+                await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
                 raise
 
         rc = proc.returncode
