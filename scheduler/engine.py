@@ -299,6 +299,10 @@ class HybridScheduler:
         await self._pool.shutdown(cancel=True)
         await self._maybe_event(ev.SCAN_CANCELLED)
 
+    def pool_stats(self) -> dict:
+        """Live worker-pool counters (for the web live monitor)."""
+        return self._pool.stats()
+
     # ── reporting (spec §12) ──────────────────────────────────────────────────
     def report_text(self, *, proxy=None, diagnostics_dir: str | None = None) -> str:
         from scheduler.report import render_report_text

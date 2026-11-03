@@ -110,6 +110,7 @@ class ScanController:
         self._module_concurrency = module_concurrency
         self._hybrid_targets = hybrid_targets
         self._scheduler_report = None
+        self._active_scheduler = None   # live HybridScheduler during a hybrid run (for the web monitor)
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
         # Central capability policy — fail-closed on an invalid mode.
@@ -525,6 +526,7 @@ class ScanController:
             limiter=self._rate_limiter,
             on_event=self._on_scheduler_event,
         )
+        self._active_scheduler = scheduler   # expose live pool stats to the web monitor
         from cli import ui
         print(ui.kv("hybrid", f"{len(targets)} target(s), {scheduler._pool.max_workers} workers"))
         self._scheduler_report = await scheduler.run(targets)
@@ -635,6 +637,18 @@ class ScanController:
     def scheduler_report(self):
         """The hybrid engine's SchedulerReport (None unless a --hybrid run ran)."""
         return self._scheduler_report
+
+    @property
+    def live_pool_stats(self):
+        """Live worker-pool stats during a hybrid run (None otherwise) — read by
+        the web live monitor. Never raises."""
+        sch = self._active_scheduler
+        if sch is None:
+            return None
+        try:
+            return sch.pool_stats()
+        except Exception:
+            return None
 
     @property
     def diagnostics(self):
