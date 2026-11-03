@@ -111,6 +111,13 @@ class ScanRepository:
         )
         return list(result.scalars())
 
+    async def recent_all(self, limit: int = 20) -> list[ScanJob]:
+        """Recent scans across ALL domains, newest first (dashboard overview)."""
+        result = await self._s.execute(
+            select(ScanJob).order_by(ScanJob.created_at.desc()).limit(limit)
+        )
+        return list(result.scalars())
+
 
 # ── EventRepository ────────────────────────────────────────────────────────────
 
@@ -159,6 +166,26 @@ class EventRepository:
             )
         )
         return result.scalar_one()
+
+    async def count_by_type(self, scan_id: UUID, event_type: EventType) -> int:
+        from sqlalchemy import func
+        result = await self._s.execute(
+            select(func.count()).select_from(EventRecord).where(
+                EventRecord.scan_job_id == scan_id,
+                EventRecord.type == event_type.value,
+            )
+        )
+        return result.scalar_one()
+
+    async def recent(self, scan_id: UUID, limit: int = 25) -> list[EventRecord]:
+        """Most recent events for a scan, newest first (dashboard feed)."""
+        result = await self._s.execute(
+            select(EventRecord)
+            .where(EventRecord.scan_job_id == scan_id)
+            .order_by(EventRecord.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
 
 
 # ── HostRepository ─────────────────────────────────────────────────────────────

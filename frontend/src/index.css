@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark charcoal SOC palette. Single dark theme (no toggle) per the design spec. */
+:root {
+  --background: 222 24% 7%;      /* charcoal page */
+  --foreground: 210 20% 92%;
+  --panel: 222 20% 9%;           /* sidebar / topbar */
+  --card: 222 19% 11%;
+  --card-foreground: 210 20% 92%;
+  --muted: 222 16% 16%;
+  --muted-foreground: 215 14% 58%;
+  --accent: 222 16% 18%;
+  --accent-foreground: 210 20% 92%;
+  --border: 222 14% 18%;
+  --input: 222 14% 16%;
+  --ring: 142 60% 42%;
+
+  --primary: 142 64% 42%;        /* green — healthy / primary action */
+  --primary-foreground: 144 60% 97%;
+
+  --success: 142 64% 45%;        /* green */
+  --warning: 38 92% 55%;         /* amber */
+  --critical: 0 72% 55%;         /* red */
+
+  --radius: 0.5rem;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Compact, data-dense scrollbars that match the theme. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted)); border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
