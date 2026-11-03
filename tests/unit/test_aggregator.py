@@ -90,6 +90,33 @@ def test_urls_deduped_across_four_sources():
     assert {"katana", "wayback", "js_intel", "apifinder"} <= prov_sources
 
 
+# ── classifier: keyword matching must respect word boundaries ─────────────────
+
+def test_interesting_login_not_matched_by_substring():
+    """Regression: 'sso' must NOT match 'accessories', 'auth' not 'author', etc.
+    On a retail catalogue this flooded interesting.txt's LOGIN bucket (~84%
+    false positives) because the classifier used naive `keyword in path`."""
+    a = ResultAggregator(out_dir="unused")
+    # real login/admin paths
+    a.observe(ev(EventType.URL, UrlData(url="https://x.example.com/login", found_via="t"), "t"))
+    a.observe(ev(EventType.URL, UrlData(url="https://x.example.com/wp-admin/", found_via="t"), "t"))
+    # catalogue noise that previously false-matched (accessories⊃sso, latest⊃test, author⊃auth)
+    a.observe(ev(EventType.URL, UrlData(url="https://x.example.com/c/car-accessories", found_via="t"), "t"))
+    a.observe(ev(EventType.URL, UrlData(url="https://x.example.com/c/latest-arrivals", found_via="t"), "t"))
+    a.observe(ev(EventType.URL, UrlData(url="https://x.example.com/blog/author/jane", found_via="t"), "t"))
+
+    login = set(a._login_pages())
+    assert "https://x.example.com/login" in login
+    assert not any("accessories" in u or "latest" in u or "/author/" in u for u in login)
+
+    sections = a._interesting()
+    # collect LOGIN + ADMIN entries from the rendered section list
+    login_admin = [l for l in sections if l.startswith("https://") and (
+        "/login" in l or "/wp-admin" in l or "accessories" in l or "latest" in l or "/author/" in l)]
+    assert "https://x.example.com/login" in login_admin
+    assert not any("accessories" in u or "latest-arrivals" in u for u in login_admin)
+
+
 # ── categorization ────────────────────────────────────────────────────────────
 
 def test_technologies_grouped_per_host():
@@ -189,6 +216,57 @@ def test_second_scan_keeps_history_and_diffs(tmp_path):
     # latest reflects the most recent scan
     latest_domains = (base / "latest" / "domains.txt").read_text()
     assert "new.example.com" in latest_domains
+
+
+# ── live (incremental) writing + flush-on-stop ────────────────────────────────
+
+def test_write_live_populates_latest_in_place(tmp_path):
+    """Results must appear in latest/ DURING the scan, not only at the end."""
+    a = ResultAggregator(out_dir=str(tmp_path))
+    a.observe(ev(EventType.SUBDOMAIN, SubdomainData(hostname="early.example.com", source="subfinder"), "subfinder"))
+
+    dest = a.write_live("example.com")
+    latest = tmp_path / "example.com" / "latest"
+    assert dest and latest.is_dir()
+    assert "early.example.com" in (latest / "domains.txt").read_text()
+    # no history snapshot created by a live write (that's write()'s job)
+    assert not (tmp_path / "example.com" / "scans").exists()
+
+    # a second subdomain shows up on the next live flush
+    a.observe(ev(EventType.SUBDOMAIN, SubdomainData(hostname="later.example.com", source="crt_sh"), "crt_sh"))
+    a.write_live("example.com")
+    assert "later.example.com" in (latest / "domains.txt").read_text()
+
+
+def test_write_live_skips_when_unchanged(tmp_path):
+    a = ResultAggregator(out_dir=str(tmp_path))
+    a.observe(ev(EventType.SUBDOMAIN, SubdomainData(hostname="x.example.com", source="subfinder"), "subfinder"))
+    assert a.write_live("example.com") is not None       # dirty → wrote
+    assert a.write_live("example.com") is None            # nothing new → skipped
+    assert a.write_live("example.com", force=True) is not None   # force always writes
+
+
+def test_final_diff_uses_primed_baseline_not_live_overwritten_latest(tmp_path):
+    """After live writing overwrote latest/ with THIS run's domains, the
+    end-of-scan diff must still compare against the PREVIOUS scan (primed at
+    start), not diff the run against itself."""
+    # first scan establishes a baseline latest/
+    a1 = ResultAggregator(out_dir=str(tmp_path))
+    a1.observe(ev(EventType.SUBDOMAIN, SubdomainData(hostname="old.example.com", source="subfinder"), "subfinder"))
+    a1.write("example.com")
+
+    # second scan: prime baseline, then live-overwrite latest/, then final write
+    a2 = ResultAggregator(out_dir=str(tmp_path))
+    a2.prime_baseline("example.com")                      # captures {old.example.com}
+    a2.observe(ev(EventType.SUBDOMAIN, SubdomainData(hostname="fresh.example.com", source="subfinder"), "subfinder"))
+    a2.write_live("example.com")                          # latest/ now has fresh.example.com only
+    a2.write("example.com")
+
+    diff_text = "\n".join(
+        p.read_text() for p in (tmp_path / "example.com" / "diff").glob("*.txt")
+    )
+    assert "fresh.example.com" in diff_text               # correctly flagged NEW
+    assert "old.example.com" in diff_text                 # correctly flagged REMOVED
 
 
 # ── extended layout: dns / files / secrets / data-exposure / subdirs ──────────

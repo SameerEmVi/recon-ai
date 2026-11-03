@@ -48,11 +48,23 @@ COST_LOW, COST_MEDIUM, COST_HIGH = 1, 3, 8
 VALUE_LOW, VALUE_MEDIUM, VALUE_HIGH = 1, 3, 8
 
 # Per-host execution cap by mode (loop prevention). 0 in config => this default.
+# This base applies to EXPENSIVE active modules (cost >= HIGH: ffuf/nuclei/katana/
+# port scanners) — they stay tightly bounded for loop/budget control.
 _CAP_BY_MODE = {
     MODE_PASSIVE_FIRST: 25,
     MODE_DEFAULT: 60,
     MODE_AGGRESSIVE: 250,
 }
+
+# Cheap analysis / body-reader modules (cost < HIGH: secretfinder, js_intel,
+# metascan, retirejs, apifinder, linkfinder, paramfinder, jsluice) fetch+parse
+# ONE already-discovered URL per op. Capping them at the active-module base
+# starves them on content-heavy hosts, so a real finding (an exposed secret, an
+# email, a vuln on an un-fetched page) appears in one run and vanishes the next.
+# They get a much higher per-host cap so they cover (effectively) the whole
+# discovered URL set — which is already finite, scope- and dedup-bounded — while
+# the expensive active modules stay at the base. Tunable via `per_host_cap`.
+_ANALYSIS_CAP_MULT = 50
 
 
 @dataclass
@@ -162,6 +174,17 @@ class ReconPlanner:
             base = max(base, VALUE_HIGH)
         return base
 
+    def _per_host_cap(self, cost: int) -> int:
+        """Per-(module,host) run cap. An explicit `per_host_cap` override wins;
+        otherwise expensive active modules (cost >= HIGH) get the mode base, and
+        cheap analysis/body-reader modules get `_ANALYSIS_CAP_MULT`× that so they
+        aren't starved on content-heavy hosts (reproducible secret/email/vuln
+        coverage)."""
+        if self.config.per_host_cap:
+            return self.config.per_host_cap
+        base = _CAP_BY_MODE.get(self.config.mode, 60)
+        return base if cost >= COST_HIGH else base * _ANALYSIS_CAP_MULT
+
     # ── the decision ──────────────────────────────────────────────────────────
 
     def evaluate(self, module, event) -> PlanDecision:
@@ -200,8 +223,9 @@ class ReconPlanner:
                 return self._record(module.name, host, etype, False,
                                     f"prerequisite {pre} not yet observed on {host}", 0, cost)
 
-        # 4. loop prevention / dedup — per (module, host) cap.
-        cap = self.config.per_host_cap or _CAP_BY_MODE.get(self.config.mode, 60)
+        # 4. loop prevention / dedup — per (module, host) cap, cost-aware so
+        #    cheap body-readers aren't starved on content-heavy hosts.
+        cap = self._per_host_cap(cost)
         key = (module.name, host)
         if self._runs[key] >= cap:
             return self._record(module.name, host, etype, False,

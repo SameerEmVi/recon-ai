@@ -165,6 +165,43 @@ def test_is_real_find_tolerates_bad_input():
     assert is_real_find(0, 10) is False
 
 
+# ── dominant_catchall_statuses: WAF 403-flood safety net ──────────────────────
+
+def test_catchall_detects_uniform_403_flood():
+    # The Warehouse case: ffuf got a 403 "Just a moment..." challenge on every
+    # path because calibration probes were 429-throttled and never learned -fc.
+    from recon.ffuf import dominant_catchall_statuses
+    assert dominant_catchall_statuses([403] * 622) == {403}
+
+
+def test_catchall_keeps_real_finds_amid_dominant_block():
+    # 403 dominates but a few real 200/301 survive — only 403 is dropped.
+    from recon.ffuf import dominant_catchall_statuses
+    statuses = [403] * 500 + [200] * 8 + [301] * 4
+    assert dominant_catchall_statuses(statuses) == {403}
+
+
+def test_catchall_ignores_2xx_dominance():
+    # A 200-heavy real site must NOT have its 200s dropped here (size calibration
+    # owns 2xx wildcards); 2xx is excluded from catch-all status dropping.
+    from recon.ffuf import dominant_catchall_statuses
+    assert dominant_catchall_statuses([200] * 300) == set()
+
+
+def test_catchall_requires_enough_rows_and_dominance():
+    from recon.ffuf import dominant_catchall_statuses
+    # too few rows to judge
+    assert dominant_catchall_statuses([403] * 5) == set()
+    # varied result set (no single status ≥80%) — trust it, drop nothing
+    assert dominant_catchall_statuses([403] * 10 + [200] * 10 + [301] * 10) == set()
+
+
+def test_catchall_tolerates_bad_input():
+    from recon.ffuf import dominant_catchall_statuses
+    assert dominant_catchall_statuses([]) == set()
+    assert dominant_catchall_statuses([None, "x", 403] * 20) == {403}  # type: ignore[list-item]
+
+
 # ── module: registered, reactive, drives ffuf and emits URLs ──────────────────
 
 def _mock_controller():

@@ -250,6 +250,36 @@ def scan(
              "e.g. when Burp's CA lacks the keyUsage extension). Explicit + logged, "
              "never silent. Prefer --proxy-ca with a valid CA.",
     ),
+    hybrid: bool = typer.Option(
+        False, "--hybrid",
+        help="Hybrid parallel engine: scan multiple authorized subdomains concurrently "
+             "under a worker pool (each seeded into the existing module cascade). "
+             "Default scan path is unchanged when this is off.",
+    ),
+    workers: int = typer.Option(
+        10, "--workers",
+        help="Hybrid worker-pool size — concurrent subdomain JOBS, not request rate "
+             f"(clamped to 1..{50}). Default 10. The shared rate limiter still governs "
+             "every outbound request, so more workers never means more request budget.",
+    ),
+    module_concurrency: int | None = typer.Option(
+        None, "--module-concurrency",
+        help="Max simultaneous requests to any ONE host (per-target concurrency on the "
+             "shared limiter). Applies to every scan. Omit = unlimited per host.",
+    ),
+    targets_file: str | None = typer.Option(
+        None, "--targets-file",
+        help="Path to an authorized-subdomain list (one host per line) for --hybrid. "
+             "Each is scope-validated; out-of-scope hosts are skipped. Omit = scan the seed.",
+    ),
+    browser_profile: str = typer.Option(
+        "chrome-windows", "--browser-profile",
+        help="Present a coherent real-browser header fingerprint on outbound requests "
+             "(not the default python-httpx UA that WAFs filter). One profile per scan, "
+             "stable throughout. Choices: chrome-windows (default), chrome-mac, "
+             "chrome-android, firefox-windows, safari-mac, off, random "
+             "(random is deterministic from the scan id).",
+    ),
     debug: bool = typer.Option(
         False, "--debug",
         help="Write verbose structured diagnostics (events/errors/http JSONL) under "
@@ -309,6 +339,28 @@ def scan(
     if proxy_cfg.active and not proxy_cfg.verify and not proxy_cfg.ca_bundle:
         typer.echo(ui.warn("TLS verification DISABLED for proxied traffic "
                            "(--proxy-insecure) — local testing only"))
+
+    # Browser header profile — fail closed on a typo (never silently fall back).
+    from net.headers import available as _hdr_available
+    if browser_profile.strip().lower() not in {s.lower() for s in _hdr_available()}:
+        typer.echo(f"[error] unknown --browser-profile {browser_profile!r}. "
+                   f"Available: {', '.join(_hdr_available())}", err=True)
+        raise typer.Exit(code=1)
+
+    # Hybrid engine: load + validate the authorized-subdomain list.
+    hybrid_targets = None
+    if targets_file:
+        import os as _os
+        if not _os.path.isfile(targets_file):
+            typer.echo(f"[error] --targets-file not found: {targets_file}", err=True)
+            raise typer.Exit(code=1)
+        from scheduler.integration import load_targets_file
+        hybrid_targets = load_targets_file(targets_file)
+        if not hybrid_targets:
+            typer.echo(f"[error] --targets-file is empty: {targets_file}", err=True)
+            raise typer.Exit(code=1)
+        if not hybrid:
+            typer.echo(ui.warn("--targets-file given without --hybrid; it will be ignored"))
 
     ai_effective = ai or agent
 
@@ -443,6 +495,11 @@ def scan(
         live=not quiet,
         proxy=proxy_cfg,
         debug=debug,
+        browser_profile=browser_profile,
+        hybrid=hybrid,
+        workers=workers,
+        module_concurrency=module_concurrency,
+        hybrid_targets=hybrid_targets,
     )
 
     try:
@@ -609,6 +666,47 @@ async def _history(domain: str, db_url: str, limit: int) -> None:
         typer.echo(
             f"{str(s.id):<38}  {s.status:<10}  {s.mode:<5}  {s.event_count:>7}  {s.created_at}"
         )
+
+
+# ── scan-status (hybrid job inspection) ─────────────────────────────────────────
+
+@app.command(name="scan-status")
+def scan_status(
+    scan_id: str = typer.Argument(..., help="Scan run id (UUID) to inspect job status for."),
+    db_url: str = typer.Option(..., "--db-url", help="Database URL."),
+    state: str | None = typer.Option(None, "--state", help="Filter by job state (e.g. RUNNING)."),
+) -> None:
+    """Show per-target / per-module job status for a scan (hybrid engine)."""
+    asyncio.run(_scan_status(scan_id, db_url, state))
+
+
+async def _scan_status(scan_id: str, db_url: str, state: str | None) -> None:
+    import uuid as _uuid
+    from collections import Counter
+
+    from database.repository import JobRepository
+    from database.session import init_db, make_engine, make_session_factory
+    try:
+        sid = _uuid.UUID(scan_id)
+    except ValueError:
+        typer.echo(f"[error] not a valid scan id: {scan_id!r}", err=True)
+        raise typer.Exit(code=1)
+    engine = make_engine(db_url)
+    try:
+        await init_db(engine)
+        async with make_session_factory(engine)() as session:
+            jobs = await JobRepository(session).list_for_scan(sid, state=state)
+        if not jobs:
+            typer.echo(f"no jobs recorded for scan {scan_id}"
+                       + (f" in state {state}" if state else ""))
+            return
+        by_state = Counter(j.state for j in jobs)
+        typer.echo("state summary: " + ", ".join(f"{k}={v}" for k, v in sorted(by_state.items())))
+        typer.echo(f"\n{'KIND':<7}  {'STATE':<12}  {'TARGET':<32}  MODULE")
+        for j in jobs:
+            typer.echo(f"{j.kind:<7}  {j.state:<12}  {j.target:<32}  {j.module or '-'}")
+    finally:
+        await engine.dispose()           # return pooled connections on the loop
 
 
 # ── diff ───────────────────────────────────────────────────────────────────────

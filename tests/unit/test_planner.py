@@ -146,11 +146,41 @@ def test_default_mode_runs_active():
 def test_aggressive_allows_more_runs_per_host():
     agg = ReconPlanner(PlannerConfig(mode=MODE_AGGRESSIVE))
     dflt = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
-    m = mod("ffuf", flags=["active"])
-    # run the same module on the same host many times; aggressive tolerates more
+    # Use an EXPENSIVE (slow → HIGH cost) module: those are the ones the mode
+    # base-cap bounds tightly, so aggressive tolerates more than default.
+    m = mod("ffuf", flags=["active", "slow"], value=VALUE_HIGH)
     agg_runs = sum(agg.evaluate(m, http_event("https://x.com/")).run for _ in range(120))
     dflt_runs = sum(dflt.evaluate(m, http_event("https://x.com/")).run for _ in range(120))
     assert agg_runs > dflt_runs
+
+
+def test_cheap_analysis_module_not_starved_by_per_host_cap():
+    # Regression (reproducible coverage): a cheap body-reader (cost < HIGH) must
+    # get a much higher per-host cap than an expensive active module, so secrets/
+    # emails/vulns on many URLs of one host are found every run, not sampled.
+    from planner.planner import _ANALYSIS_CAP_MULT, _CAP_BY_MODE
+    p = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
+    reader = mod("secretfinder", flags=["active", "web"])        # MEDIUM cost
+    base = _CAP_BY_MODE[MODE_DEFAULT]
+    runs = sum(p.evaluate(reader, url_event(f"https://x.com/p{i}")).run
+               for i in range(base + 50))
+    assert runs == base + 50                         # all ran — not capped at 60
+
+    # An expensive module on the same host stays bounded at the base.
+    p2 = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT))
+    slow = mod("ffuf", flags=["active", "slow"], value=VALUE_HIGH)  # HIGH cost
+    slow_runs = sum(p2.evaluate(slow, url_event(f"https://x.com/p{i}")).run
+                    for i in range(base + 50))
+    assert slow_runs == base                         # capped at the mode base
+    # And the cheap tier's cap is the base × the analysis multiplier.
+    assert p._per_host_cap(1) == base * _ANALYSIS_CAP_MULT
+    assert p._per_host_cap(99) == base               # HIGH cost → base
+
+
+def test_explicit_per_host_cap_override_still_wins():
+    # An explicit override applies to every module regardless of cost.
+    p = ReconPlanner(PlannerConfig(mode=MODE_DEFAULT, per_host_cap=5))
+    assert p._per_host_cap(1) == 5 and p._per_host_cap(99) == 5
 
 
 # ── budgets & loop prevention ────────────────────────────────────────────────

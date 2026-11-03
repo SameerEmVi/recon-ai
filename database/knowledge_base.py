@@ -207,6 +207,69 @@ class KnowledgeBase:
                 fh.write(w + "\n")
         return len(words)
 
+    # Path-shaped categories worth promoting into a content-discovery wordlist
+    # (parameters / param-values / api-versions are not path tokens, so excluded).
+    _PATH_CATEGORIES: tuple[str, ...] = (
+        vocabulary.DIRECTORIES, vocabulary.FILES, vocabulary.ENDPOINTS,
+        vocabulary.API_PATHS, vocabulary.RESOURCE_NAMES,
+    )
+
+    async def export_discovered_paths(
+        self,
+        out_path: str,
+        *,
+        exclude_file: str | None = None,
+        scope_type: str = SCOPE_GLOBAL,
+        scope_key: str = "",
+        min_confidence: float = 0.0,
+        limit_per_category: int | None = None,
+    ) -> int:
+        """Write a REVIEW BACKLOG of learned path tokens that are NOT already in a
+        generic wordlist (`exclude_file`, e.g. wordlists/combined.txt), ranked by
+        the KB's breadth/frequency/confidence ordering.
+
+        This is the manual-promote workflow: the generic list stays generic and is
+        NEVER written here — you review this backlog and move the good tokens into
+        the generic list yourself. Returns the count written. Never raises on an
+        unwritable/unreadable path side (caller may still see OSError on open)."""
+        import os
+
+        have: set[str] = set()
+        if exclude_file:
+            try:
+                with open(exclude_file, encoding="utf-8") as fh:
+                    have = {
+                        ln.strip().lower() for ln in fh
+                        if ln.strip() and not ln.lstrip().startswith("#")
+                    }
+            except OSError:
+                have = set()
+
+        seen: set[str] = set()
+        rows: list[str] = []
+        for cat in self._PATH_CATEGORIES:
+            for w in await self.generate_wordlist(
+                cat, scope_type=scope_type, scope_key=scope_key,
+                min_confidence=min_confidence, limit=limit_per_category,
+            ):
+                key = w.strip().lower()
+                if not key or key in have or key in seen:
+                    continue
+                seen.add(key)
+                rows.append(w)
+
+        parent = os.path.dirname(os.path.abspath(out_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("# Recon-AI — discovered paths pending review (NOT auto-merged).\n")
+            fh.write("# Learned path tokens not already in the generic wordlist.\n")
+            fh.write("# Review these, then promote the good ones into the generic "
+                     "wordlist (e.g. wordlists/combined.txt) yourself.\n")
+            for w in rows:
+                fh.write(w + "\n")
+        return len(rows)
+
     async def stats(
         self, scope_type: str | None = None, scope_key: str | None = None
     ) -> dict:

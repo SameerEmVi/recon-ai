@@ -183,6 +183,55 @@ class VocabularyTarget(SQLModel, table=True):
     first_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+# ── JobRecord (hybrid scanning engine — per-target / per-module job lifecycle) ──
+
+class JobRecord(SQLModel, table=True):
+    """Persisted lifecycle of one scheduler job (a target scan, or a module run
+    against a target), so an in-progress hybrid scan can be inspected/resumed.
+    Unique per (scan, dedup_key) so the same unit of work is never duplicated.
+    State mirrors scheduler.jobs.JobState."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("scan_job_id", "dedup_key", name="uq_job_scan_dedup"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    scan_job_id: uuid.UUID = Field(foreign_key="scan_jobs.id", index=True)
+    parent_job_id: Optional[uuid.UUID] = Field(default=None, index=True)
+    kind: str = Field(index=True)              # "target" | "module"
+    target: str = Field(index=True)
+    module: Optional[str] = Field(default=None, index=True)
+    state: str = Field(default="QUEUED", index=True)   # JobState.value
+    priority: int = Field(default=100)
+    dedup_key: str = Field(index=True)
+    correlation_id: Optional[str] = Field(default=None)
+    error: Optional[str] = Field(default=None)
+    result: Optional[Any] = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @classmethod
+    def from_job(cls, job, scan_job_id: uuid.UUID | None = None) -> "JobRecord":
+        """Project a scheduler.jobs.Job onto a persistable row."""
+        return cls(
+            id=job.id,
+            scan_job_id=scan_job_id or job.scan_id,
+            parent_job_id=job.parent_id,
+            kind=job.kind.value,
+            target=job.target,
+            module=job.module,
+            state=job.state.value,
+            priority=job.priority,
+            dedup_key=job.dedup_key,
+            correlation_id=job.correlation_id,
+            error=job.error,
+            result=job.result,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
+
+
 # ── AiAssessment (Phase 3 stub) ────────────────────────────────────────────────
 
 class AiAssessment(SQLModel, table=True):

@@ -68,7 +68,8 @@ class GoWitnessModule(BaseModule):
                 proc.communicate(), timeout=self.opt("timeout") + 5
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            from recon.proc import terminate_tree
+            await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
             self._log.warning("gowitness timed out on %s", url)
             return
 

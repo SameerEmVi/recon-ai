@@ -261,6 +261,42 @@ async def test_export_to_file(session, tmp_path):
     assert set(lines) == {"admin", "login"}
 
 
+async def test_export_discovered_paths_backlog_excludes_generic(session, tmp_path):
+    """The review backlog = learned PATH tokens not already in the generic
+    wordlist; the generic list is never written here (manual promote workflow)."""
+    kb = KnowledgeBase(session)
+    # learned path tokens across path-shaped categories
+    await kb.learn(Candidate("admin", DIRECTORIES), scan_domain="a.com")      # already generic
+    await kb.learn(Candidate("graphql-internal", DIRECTORIES), scan_domain="a.com")
+    await kb.learn(Candidate("backup.sql", FILES), scan_domain="a.com")
+    await kb.learn(Candidate("export", ENDPOINTS), scan_domain="a.com")
+    # a parameter must NOT appear — params aren't path tokens
+    await kb.learn(Candidate("redirect_uri", PARAMETERS), scan_domain="a.com")
+
+    generic = tmp_path / "combined.txt"
+    generic.write_text("# comment\nadmin\nlogin\nindex\n", encoding="utf-8")
+
+    backlog = tmp_path / "discovered.txt"
+    n = await kb.export_discovered_paths(str(backlog), exclude_file=str(generic))
+
+    text = backlog.read_text()
+    body = [l for l in text.splitlines() if l and not l.startswith("#")]
+    assert text.startswith("# Recon-AI")                 # review header present
+    assert "admin" not in body                           # already in generic → excluded
+    assert {"graphql-internal", "backup.sql", "export"} <= set(body)  # new paths kept
+    assert "redirect_uri" not in body                    # params excluded
+    assert n == len(body)
+
+
+async def test_export_discovered_paths_no_exclude_writes_all_paths(session, tmp_path):
+    kb = KnowledgeBase(session)
+    await kb.learn(Candidate("dashboard", DIRECTORIES), scan_domain="a.com")
+    backlog = tmp_path / "discovered.txt"
+    n = await kb.export_discovered_paths(str(backlog))    # no generic to exclude
+    assert n == 1
+    assert "dashboard" in backlog.read_text().splitlines()
+
+
 async def test_stats_by_category_and_scope(session):
     kb = KnowledgeBase(session)
     await kb.learn(Candidate("admin", DIRECTORIES), scan_domain="a.com")

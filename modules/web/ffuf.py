@@ -41,6 +41,7 @@ from recon.ffuf import (
     FfufWrapper,
     build_command,
     derive_calibration,
+    dominant_catchall_statuses,
     generate_random_string,
     is_real_find,
     parse_ffuf_json,
@@ -228,6 +229,18 @@ class FfufModule(BaseModule):
             except OSError:
                 pass
 
+        # Post-hoc catch-all gate: if one non-2xx status dominates ffuf's own
+        # results, it's the host's catch-all (typically a WAF that 403-challenges
+        # every path while throttling the calibration probes to 429, so -fc never
+        # learned it). Drop every row of that status so a WAF challenge doesn't
+        # become hundreds of phantom URLs that then recursively fan out.
+        catchall = dominant_catchall_statuses([r.status for r in results])
+        if catchall:
+            self._log.info(
+                "ffuf: %s → treating status %s as catch-all noise (dominates %d results)",
+                base, sorted(catchall), len(results),
+            )
+
         max_results = int(self.opt("max_results"))
         emitted = 0
         dropped = 0
@@ -235,10 +248,11 @@ class FfufModule(BaseModule):
             if emitted >= max_results:
                 break
             # Final noise gate, independent of the per-host calibration filters:
-            # drop statuses that never indicate a resource (400/404/429/5xx) and
-            # empty-bodied 2xx catch-all stubs. `-mc all` surfaces these and a
-            # mis-learned baseline can let them through, so filter unconditionally.
-            if not is_real_find(res.status, res.length):
+            # drop statuses that never indicate a resource (400/404/429/5xx),
+            # empty-bodied 2xx catch-all stubs, and any dominant catch-all status
+            # detected post-hoc above. `-mc all` surfaces these and a mis-learned
+            # baseline can let them through, so filter unconditionally.
+            if res.status in catchall or not is_real_find(res.status, res.length):
                 dropped += 1
                 continue
             if await self.emit(

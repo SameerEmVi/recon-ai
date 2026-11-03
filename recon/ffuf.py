@@ -81,6 +81,48 @@ def is_real_find(status: int, length: int) -> bool:
     return True
 
 
+# Post-hoc catch-all detection ────────────────────────────────────────────────
+# Pre-fuzz calibration probes a few random paths, but a WAF/CDN can answer those
+# differently from what ffuf then sees: the classic failure is the probes being
+# throttled to 429 (so calibration learns nothing useful) while ffuf's own run
+# gets a *uniform* 403 "Just a moment..." challenge on every path. ffuf's own
+# result set is the ground truth — when a single non-2xx status covers the
+# overwhelming majority of rows, that status is the host's catch-all (a WAF
+# block page, a blanket 401/403, a global redirect), not hundreds of real
+# resources. 2xx is excluded on purpose: a real site legitimately returns many
+# 200s, and 2xx wildcards are already handled by size calibration (-fs).
+CATCHALL_MIN_ROWS = 15       # need enough rows for "dominant" to mean anything
+CATCHALL_DOMINANCE = 0.80    # one status covering ≥80% of rows ⇒ catch-all
+
+
+def dominant_catchall_statuses(statuses) -> set[int]:
+    """Non-2xx statuses that dominate the ffuf result set (host catch-all).
+
+    A robust safety net for when pre-fuzz calibration couldn't predict what ffuf
+    would see (typically a WAF: calibration probes throttled to 429, ffuf's run
+    blanket-403'd). Pure + unit-tested. Returns the set of statuses whose rows
+    should be dropped; empty when the result set is varied enough to trust.
+    """
+    from collections import Counter
+
+    codes: list[int] = []
+    for s in statuses:
+        try:
+            codes.append(int(s))
+        except (TypeError, ValueError):
+            continue
+    total = len(codes)
+    if total < CATCHALL_MIN_ROWS:
+        return set()
+    drop: set[int] = set()
+    for st, n in Counter(codes).items():
+        if st <= 0 or 200 <= st < 300:
+            continue
+        if n >= CATCHALL_MIN_ROWS and n / total >= CATCHALL_DOMINANCE:
+            drop.add(st)
+    return drop
+
+
 @dataclass
 class FfufResult:
     url: str

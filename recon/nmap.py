@@ -98,7 +98,8 @@ class NmapWrapper:
                     proc.communicate(), timeout=self._timeout
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                from recon.proc import terminate_tree
+                await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
                 log.warning("[nmap] timed out after %ds on %s", self._timeout, host)
                 return []
 

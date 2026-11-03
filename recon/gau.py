@@ -57,7 +57,8 @@ class GauWrapper:
                     proc.communicate(), timeout=self._timeout
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                from recon.proc import terminate_tree
+                await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
                 log.warning("[gau] timed out after %ds", self._timeout)
                 return
 

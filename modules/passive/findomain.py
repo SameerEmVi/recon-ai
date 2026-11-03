@@ -46,7 +46,8 @@ class FindomainModule(BaseModule):
                 proc.communicate(), timeout=self.opt("timeout")
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            from recon.proc import terminate_tree
+            await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
             self._log.warning("findomain timed out after %ds", self.opt("timeout"))
             return
 

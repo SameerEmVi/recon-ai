@@ -29,6 +29,11 @@ class HttpxWrapper(BaseReconTool):
         p = get_proxy(self._ctrl)
         if p.active:
             args += ["-proxy", p.url]   # route probe traffic through Burp
+        # Present the scan's browser header profile (None under a mock controller).
+        from net.headers import get_headers
+        profile = get_headers(self._ctrl)
+        if profile is not None:
+            args += profile.cli_args("-H")
         return args
 
     async def _probe_one(

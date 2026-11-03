@@ -35,6 +35,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# The bundled wordlists dir: `combined.txt` is the generic content-discovery list
+# (ffuf's default, shared by every target) and `discovered.txt` is the auto-written
+# review backlog of newly-learned paths NOT yet in the generic list. The generic
+# list is never auto-merged — promotion from the backlog is a manual step.
+from pathlib import Path as _Path
+_WORDLIST_DIR = _Path(__file__).resolve().parent.parent / "wordlists"
+
 
 class SeedOutOfScope(ValueError):
     """The requested seed domain is not IN scope — the scan must not start."""
@@ -74,6 +81,14 @@ class ScanController:
         # Outbound proxy (Burp) + structured diagnostics.
         proxy=None,                 # net.proxy.ProxyConfig | None
         debug: bool = False,        # enable verbose structured diagnostics
+        # Browser header profile — a coherent real-browser client fingerprint for
+        # outbound requests (off | random | a profile name from net.headers).
+        browser_profile: str = "chrome-windows",
+        # Hybrid parallel scanning engine (opt-in; default path is unchanged).
+        hybrid: bool = False,
+        workers: int | None = None,             # worker-pool size (default 10 in hybrid)
+        module_concurrency: int | None = None,  # per-target concurrency on the shared limiter
+        hybrid_targets: list[str] | None = None,  # authorized subdomains to scan concurrently
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -84,7 +99,17 @@ class ScanController:
         # await the whole set before we mark the scan complete, so end-of-scan
         # writes land instead of racing teardown. Mirrors EventBus._tasks.
         self._persist_tasks: set[asyncio.Task] = set()
-        self._rate_limiter = RateLimiter(rate_limit, max_concurrency, name="scan")
+        # per_target_concurrency (from --module-concurrency) bounds simultaneous
+        # requests to any one host — applies to every scan, hybrid or not.
+        self._rate_limiter = RateLimiter(
+            rate_limit, max_concurrency, name="scan",
+            per_target_concurrency=module_concurrency,
+        )
+        self._hybrid = bool(hybrid)
+        self._workers = workers
+        self._module_concurrency = module_concurrency
+        self._hybrid_targets = hybrid_targets
+        self._scheduler_report = None
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
         # Central capability policy — fail-closed on an invalid mode.
@@ -120,8 +145,20 @@ class ScanController:
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
         self._scan_id = uuid.uuid4()
+        # Browser header profile — resolved ONCE and kept stable for the whole
+        # scan (no per-request rotation). The scan id seeds 'random' so a scan
+        # stays on one fingerprint and reruns reproduce. A bad name raises
+        # ValueError here (fail-closed) rather than silently sending defaults.
+        from net.headers import resolve as _resolve_headers
+        self._headers = _resolve_headers(browser_profile, seed=str(self._scan_id))
         self._persister: Persister | None = None
         self._knowledge_base: "KnowledgeBase | None" = None
+        # The async DB engine + the two sessions opened on it (persister, KB),
+        # retained so they can be closed/disposed in the event loop at teardown
+        # rather than garbage-collected at interpreter shutdown (which raises the
+        # aiosqlite "greenlet is being finalized" / non-checked-in-connection warn).
+        self._db_engine = None
+        self._kb_session = None
         self._summary: dict[str, list] = {}
         self._scan_domain: str | None = None
         self._live = live
@@ -324,6 +361,7 @@ class ScanController:
         print(ui.kv("mode", mode))
         print(ui.kv("seed", seed_domain))
         print(ui.kv("rate-lim", self._rate_limiter.describe()))
+        print(ui.kv("browser", self._headers.name if self._headers else "off"))
         if self._proxy.active or self._debug:
             print(ui.kv("proxy", self._proxy.describe()))
 
@@ -357,9 +395,21 @@ class ScanController:
         if self._db_url:
             await self._init_db()
 
+        # Live result writing: snapshot the previous scan's domains for the diff,
+        # then start a periodic writer so results populate in results/<domain>/latest/
+        # DURING the scan — and a stopped / interrupted / killed scan still leaves
+        # an up-to-date tree instead of nothing.
+        live_task = None
+        if self._aggregator is not None:
+            self._aggregator.prime_baseline(seed_domain)
+            live_task = asyncio.create_task(self._live_result_writer(seed_domain))
+
         failed = False
         try:
-            await self._do_run(seed_domain)
+            if self._hybrid:
+                await self._do_run_hybrid(seed_domain)
+            else:
+                await self._do_run(seed_domain)
         except BaseException as exc:
             # BaseException so a cancelled/interrupted scan is not recorded as
             # complete either.
@@ -374,6 +424,14 @@ class ScanController:
                            stack_trace=None if cancelled else traceback.format_exc())
             raise
         finally:
+            # 1. Stop the live writer; the final write() below supersedes it.
+            if live_task is not None:
+                live_task.cancel()
+                try:
+                    await live_task
+                except BaseException:
+                    pass
+            # 2. Record the scan outcome in the DB.
             if self._persister:
                 # Drain in-flight event writes before recording the outcome, so
                 # end-of-scan emissions (vulnassess/cloud_intel at finish()) are
@@ -383,6 +441,49 @@ class ScanController:
                     await self._persister.scan_fail(self._scan_id)
                 else:
                     await self._persister.scan_end(self._scan_id, self._bus.seen_count)
+            # 3. Summary + planner stats — ALWAYS, so a stopped scan still reports.
+            try:
+                self.print_summary()
+                pstats = self._planner.stats
+                if pstats["skipped"] or self._planner.config.mode != "default":
+                    print("\n" + ui.section("Planner", f"{pstats['mode']}"))
+                    print(ui.info(
+                        f"considered {pstats['considered']} · ran {pstats['ran']} · "
+                        f"skipped {pstats['skipped']} · cost {pstats['cost_spent']}"))
+                    for reason, n in sorted(pstats["skip_reasons"].items(), key=lambda kv: -kv[1])[:6]:
+                        print(ui.bullet(f"{ui.paint(str(n), 'byellow')} skipped — {reason}", "grey"))
+                print(ui.ok(ui.paint(
+                    f"{'stopped' if failed else 'done'} — {self._bus.seen_count} events total",
+                    "bgreen", bold=True)))
+            except Exception as exc:
+                log.debug("summary printing failed: %s", exc)
+            # 4. Final result write — ALWAYS (normal, interrupted, or crashed), so a
+            # stopped scan still leaves a complete tree (history snapshot + latest + diff).
+            if self._aggregator is not None:
+                try:
+                    import os as _os
+                    scan_dir = self._aggregator.write(seed_domain)
+                    base = _os.path.dirname(_os.path.dirname(scan_dir))
+                    print(ui.ok(f"results written → {scan_dir}"))
+                    print(ui.info(f"latest → {_os.path.join(base, 'latest')}"))
+                except Exception as exc:
+                    log.error("failed to write results: %s", exc)
+            # Learning backlog: write newly-learned path tokens NOT already in the
+            # generic wordlist to wordlists/discovered.txt for manual review. The
+            # generic combined.txt is never auto-merged — promotion stays manual.
+            if self._knowledge_base is not None:
+                try:
+                    generic = _WORDLIST_DIR / "combined.txt"
+                    backlog = _WORDLIST_DIR / "discovered.txt"
+                    n = await self._knowledge_base.export_discovered_paths(
+                        str(backlog),
+                        exclude_file=str(generic) if generic.is_file() else None,
+                    )
+                    print(ui.info(f"discovered-paths backlog → {backlog} "
+                                  f"({n} new to review; promote into combined.txt manually)"))
+                except Exception as exc:
+                    log.debug("discovered-paths backlog export failed: %s", exc)
+            # 5. Diagnostics close + summary.
             if diag is not None:
                 if not failed:
                     diag.event("INFO", "scan_complete", module="controller",
@@ -394,28 +495,79 @@ class ScanController:
                                   f"{diag.directory}"))
                 elif self._debug:
                     print(ui.info(f"diagnostics → {diag.directory}"))
+            # 6. Close DB sessions + dispose the engine IN the event loop, so its
+            #    connection pool is returned cleanly instead of being finalized by
+            #    the GC at shutdown (the aiosqlite greenlet/non-checked-in warning).
+            await self._teardown_db()
 
-        self.print_summary()
+    async def _do_run_hybrid(self, seed_domain: str) -> None:
+        """Opt-in hybrid pass: scan multiple authorized subdomains concurrently
+        under the worker pool, each seeded into the EXISTING bus + module system
+        (the whole cascade is reused, not reimplemented). Scope is enforced per
+        target through the same chokepoint; request concurrency stays governed by
+        the shared RateLimiter."""
+        from scheduler.engine import HybridScheduler, ModuleSpec
+        from scheduler.integration import build_subdomain_runner
+
+        # Load + subscribe reactive modules so a seeded SUBDOMAIN triggers the
+        # per-host chain (dnsx/httpx_probe/web/…). Seed enumeration modules are
+        # not run — the authorized targets ARE the subdomains.
+        await self._load_and_setup_modules()
+        targets = self._hybrid_targets or [seed_domain]
+
+        scheduler = HybridScheduler(
+            scan_id=self._scan_id,
+            scope_engine=self._scope_engine,
+            module_specs=[ModuleSpec("pipeline")],   # one job per target; the bus owns module order
+            module_runner=build_subdomain_runner(self),
+            max_workers=self._workers or 10,
+            persister=self._persister,
+            limiter=self._rate_limiter,
+            on_event=self._on_scheduler_event,
+        )
         from cli import ui
-        pstats = self._planner.stats
-        if pstats["skipped"] or self._planner.config.mode != "default":
-            print("\n" + ui.section("Planner", f"{pstats['mode']}"))
-            print(ui.info(
-                f"considered {pstats['considered']} · ran {pstats['ran']} · "
-                f"skipped {pstats['skipped']} · cost {pstats['cost_spent']}"))
-            for reason, n in sorted(pstats["skip_reasons"].items(), key=lambda kv: -kv[1])[:6]:
-                print(ui.bullet(f"{ui.paint(str(n), 'byellow')} skipped — {reason}", "grey"))
-        print(ui.ok(ui.paint(f"done — {self._bus.seen_count} events total", "bgreen", bold=True)))
+        print(ui.kv("hybrid", f"{len(targets)} target(s), {scheduler._pool.max_workers} workers"))
+        self._scheduler_report = await scheduler.run(targets)
 
-        if self._aggregator is not None:
+        # Let the per-host cascades settle, run finish() emissions, settle again.
+        await self._bus.drain()
+        for module in self._loaded_modules:
             try:
-                import os as _os
-                scan_dir = self._aggregator.write(seed_domain)
-                base = _os.path.dirname(_os.path.dirname(scan_dir))
-                print(ui.ok(f"results written → {scan_dir}"))
-                print(ui.info(f"latest → {_os.path.join(base, 'latest')}"))
+                await module.finish()
             except Exception as exc:
-                log.error("failed to write results: %s", exc)
+                log.error("module %s finish() raised: %s", module.name, exc)
+        await self._bus.drain()
+
+        # Unified §12 report (printed now; persisted jobs/events carry the rest).
+        diag_dir = getattr(self._diagnostics, "directory", None)
+        print("\n" + scheduler.report_text(proxy=self._proxy, diagnostics_dir=diag_dir))
+
+    async def _on_scheduler_event(self, name: str, payload: dict) -> None:
+        """Fan a scheduler event onto the diagnostics stream (never raises)."""
+        if self._diagnostics is None:
+            return
+        try:
+            self._diagnostics.event(
+                "INFO", name, module="scheduler", operation="hybrid",
+                **{k: v for k, v in payload.items()
+                   if k in ("target", "module", "status", "correlation_id")},
+            )
+        except Exception as exc:
+            log.debug("scheduler event %s not logged: %s", name, exc)
+
+    async def _live_result_writer(self, domain: str, interval: float = 10.0) -> None:
+        """Periodically flush the aggregator's current tree to results/<domain>/latest/
+        so results populate live during the scan (subdomains/hosts/URLs appear as
+        they're found) and a stopped/killed scan still leaves an up-to-date snapshot.
+        Cancelled by run()'s finally; never crashes the scan."""
+        if self._aggregator is None:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self._aggregator.write_live(domain)
+            except Exception as exc:
+                log.debug("live result write failed: %s", exc)
 
     # ── properties ────────────────────────────────────────────────────────────
 
@@ -474,6 +626,17 @@ class ScanController:
         return self._proxy
 
     @property
+    def headers(self):
+        """The scan's browser HeaderProfile (None when off). Applied to every
+        outbound request by BaseModule.http_client and the httpx prober."""
+        return self._headers
+
+    @property
+    def scheduler_report(self):
+        """The hybrid engine's SchedulerReport (None unless a --hybrid run ran)."""
+        return self._scheduler_report
+
+    @property
     def diagnostics(self):
         """The scan's DiagnosticsLogger (None until run() starts; NOOP via
         diagnostics.get_diagnostics under a mock controller)."""
@@ -514,6 +677,7 @@ class ScanController:
         from database.session import init_db, make_engine, make_session_factory
         engine = make_engine(self._db_url)  # type: ignore[arg-type]
         await init_db(engine)
+        self._db_engine = engine                # retained for clean teardown
         factory = make_session_factory(engine)
         session = factory()
         self._persister = Persister(session)
@@ -521,7 +685,8 @@ class ScanController:
         # engine so its (lock-serialized) writes never interleave with the
         # persister's on a single shared AsyncSession.
         from database.knowledge_base import KnowledgeBase
-        self._knowledge_base = KnowledgeBase(factory())
+        self._kb_session = factory()
+        self._knowledge_base = KnowledgeBase(self._kb_session)
         scope_config = {
             "in_scope": [r.raw for r in self._scope.in_scope],
             "out_scope": [r.raw for r in self._scope.out_scope],
@@ -533,6 +698,24 @@ class ScanController:
             scope_config=scope_config,
             mode="B" if self._ai_enabled else "A",
         )
+
+    async def _teardown_db(self) -> None:
+        """Close the persister + KB sessions and dispose the async engine, each
+        guarded so teardown never raises (and is a no-op without a DB). Disposing
+        here — on the loop — returns pooled connections cleanly; leaving it to GC
+        is what triggered the aiosqlite 'greenlet is being finalized' warning."""
+        for session in (getattr(self._persister, "_session", None), self._kb_session):
+            if session is not None:
+                try:
+                    await session.close()
+                except Exception as exc:
+                    log.debug("db session close failed: %s", exc)
+        if self._db_engine is not None:
+            try:
+                await self._db_engine.dispose()
+            except Exception as exc:
+                log.debug("db engine dispose failed: %s", exc)
+            self._db_engine = None
 
     async def _load_and_setup_modules(self) -> tuple[list["BaseModule"], list["BaseModule"]]:
         """
@@ -667,12 +850,19 @@ class ScanController:
             log.info("[plan] seed modules skipped (%s mode): %s",
                      self._planner.config.mode, ", ".join(skipped))
         if approved_seeds:
-            await asyncio.gather(
+            # return_exceptions=True so one seed module raising (e.g. a subprocess
+            # cleanup ProcessLookupError on a timeout-race) can never abort the
+            # whole scan — mirrors the reactive drain's isolation. Log, don't crash.
+            results = await asyncio.gather(
                 *[
                     asyncio.create_task(m.run(seed_domain, self._scan_id))
                     for m in approved_seeds
-                ]
+                ],
+                return_exceptions=True,
             )
+            for mod, res in zip(approved_seeds, results):
+                if isinstance(res, BaseException) and not isinstance(res, asyncio.CancelledError):
+                    log.error("seed module %s failed: %r", mod.name, res)
 
         # Wait for the reactive cascade (subdomain→resolve→probe→fuzz, incl. slow
         # modules like ffuf) to go quiescent before teardown. Replaces

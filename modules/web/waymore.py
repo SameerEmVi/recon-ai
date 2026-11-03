@@ -69,7 +69,8 @@ class WaymoreModule(BaseModule):
                 try:
                     await asyncio.wait_for(proc.communicate(), timeout=self.opt("timeout"))
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    from recon.proc import terminate_tree
+                    await terminate_tree(proc)   # kills tree + reaps; never raises (guards ProcessLookupError)
                     self._log.warning("waymore timed out on %s", host)
                     return None
             with open(tmp.name, "r", encoding="utf-8", errors="replace") as f:
