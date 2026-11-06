@@ -1,0 +1,19 @@
+# Trusted public DNS resolvers for puredns/massdns brute-force.
+# Curated, well-known operators only — using a small list of trustworthy
+# resolvers avoids poisoned/lying resolvers that a large scraped list invites
+# (a bad resolver fabricates NXDOMAIN->A answers and defeats wildcard filtering).
+# Override with the module `resolvers` option to point at your own list.
+8.8.8.8
+8.8.4.4
+1.1.1.1
+1.0.0.1
+9.9.9.9
+149.112.112.112
+208.67.222.222
+208.67.220.220
+94.140.14.14
+94.140.15.15
+76.76.2.0
+76.76.10.0
+185.228.168.9
+76.223.122.150

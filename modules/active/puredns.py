@@ -19,6 +19,7 @@ from modules.base import BaseModule
 from modules.registry import register
 
 _BUNDLED_WORDLIST = Path(__file__).parent.parent.parent / "wordlists" / "dns_names.txt"
+_BUNDLED_RESOLVERS = Path(__file__).parent.parent.parent / "wordlists" / "resolvers.txt"
 
 
 def parse_hosts(text: str, domain: str) -> list[str]:
@@ -54,13 +55,14 @@ class PureDnsModule(BaseModule):
             return
 
         cmd = ["puredns", "bruteforce", wordlist, domain, "--quiet"]
-        resolvers = self.opt("resolvers")
+        # Default to the bundled trusted-resolver list; the option overrides it.
+        resolvers = self.opt("resolvers") or str(_BUNDLED_RESOLVERS)
         if resolvers and Path(resolvers).exists():
             cmd += ["-r", resolvers]
         else:
             self._log.warning(
-                "puredns: no resolvers file (option 'resolvers') — puredns may "
-                "refuse to run; provide one for reliable results"
+                "puredns: resolvers file not found (%s) — puredns may refuse to "
+                "run; set the 'resolvers' option to a valid list", resolvers
             )
 
         out = await self.run_proc(cmd, timeout=self.opt("timeout"))

@@ -100,7 +100,7 @@ MODULE_CAPABILITIES: dict[str, frozenset[str]] = {
     "dnsx": frozenset({CAP_TARGET_DNS_QUERY}),
 
     # active discovery (brute / permutation / zone-transfer / reverse / crawl / cloud probing)
-    "dnsbrute": frozenset({CAP_ACTIVE_DISCOVERY}),
+    "dnsbrute": frozenset({CAP_ACTIVE_DISCOVERY, CAP_TARGET_HTTP_REQUEST}),  # + HTTP wildcard recovery
     "puredns": frozenset({CAP_ACTIVE_DISCOVERY}),
     "gotator": frozenset({CAP_ACTIVE_DISCOVERY}),
     "permutations": frozenset({CAP_ACTIVE_DISCOVERY}),
