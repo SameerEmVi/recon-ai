@@ -4,8 +4,10 @@ naabu — Port scanning via the naabu binary.
 Reactive module: fires on every IP event, scans for open ports, and
 emits OPEN_PORT events.
 
-Default ports: top-1000 ports via naabu's built-in list (same as nmap -F).
-Can be overridden with the `ports` option.
+Alternative to the default **rustscan** port scanner — not in the default FULL
+set; select it explicitly with `-m naabu` (so a scan never port-scans each IP
+with both). Default ports: top-1000 via naabu's built-in list (same as nmap -F),
+overridable with the `ports` option.
 
 Watches:  IP
 Produces: OPEN_PORT

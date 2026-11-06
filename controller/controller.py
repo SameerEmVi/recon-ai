@@ -89,6 +89,12 @@ class ScanController:
         workers: int | None = None,             # worker-pool size (default 10 in hybrid)
         module_concurrency: int | None = None,  # per-target concurrency on the shared limiter
         hybrid_targets: list[str] | None = None,  # authorized subdomains to scan concurrently
+        # Resolved-IP port scanning: authorize the IPs that in-scope hosts resolve
+        # to as scan targets (so rustscan/naabu can run). CDN/cloud edge IPs are
+        # skipped unless scan_cdn_ips is set (scanning shared provider infra is
+        # out of authorization). Applies in active/full only (PORT_SCANNING gate).
+        scan_resolved_ips: bool = True,
+        scan_cdn_ips: bool = False,
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -163,6 +169,12 @@ class ScanController:
         self._summary: dict[str, list] = {}
         self._scan_domain: str | None = None
         self._live = live
+        # Resolved-IP port scanning + its CDN guard.
+        self._scan_resolved_ips = bool(scan_resolved_ips)
+        self._scan_cdn_ips = bool(scan_cdn_ips)
+        # Hosts observed to be CDN/cloud-fronted (via a CNAME to a known CDN),
+        # so their resolved IPs are skipped even if the IP range isn't listed.
+        self._cdn_fronted_hosts: set[str] = set()
         # Modules are loaded lazily in _do_run() (setup() is async).
         self._loaded_modules: list["BaseModule"] = []
 
@@ -176,6 +188,10 @@ class ScanController:
         through here. This is the single scope-enforcement chokepoint.
         """
         candidate = self._candidate_from(event)
+        # Resolved-IP port scanning: note CDN-fronted hosts and (CDN-guarded)
+        # authorize the IPs in-scope hosts resolve to, BEFORE the scope decision,
+        # so an authorized IP evaluates IN and the port scanner can react.
+        self._observe_for_resolved_ip_scan(event)
         decision = self._scope_engine.evaluate(
             candidate, source_distance=max(0, event.distance - 1)
         )
@@ -1007,6 +1023,57 @@ class ScanController:
             )
         except Exception as exc:
             log.error("agent loop failed: %s", exc)
+
+    def _observe_for_resolved_ip_scan(self, event: Event) -> None:
+        """Operator opt-in (default-on): authorize the IPs that in-scope hosts
+        resolve to, so the port scanner (rustscan/naabu) can run against them.
+
+        Deny-first and the distance bound are untouched — authorization only
+        reaches the ALLOW step of the scope engine. Gated to modes where port
+        scanning is permitted (active/full), and CDN/cloud edge IPs are skipped
+        unless the operator set scan_cdn_ips (scanning shared provider infra is
+        out of authorization). CDN detection uses the IP range and any CNAME to
+        a known CDN seen for the host.
+        """
+        if not self._scan_resolved_ips:
+            return
+        try:
+            from policy import CAP_PORT_SCANNING
+            if not self._policy.allows(CAP_PORT_SCANNING):
+                return   # no port scanning in this mode → nothing to authorize
+        except Exception:
+            return
+
+        d = event.data
+        etype = event.type.value
+
+        # Track CDN-fronted hosts from CNAME chains (best-effort, before the IP).
+        if etype == "DNS_RECORD" and getattr(d, "record_type", "").upper() == "CNAME":
+            from recon.cdncheck import cdn_provider_for_cname
+            if cdn_provider_for_cname(getattr(d, "value", "") or ""):
+                host = (getattr(d, "hostname", "") or "").strip().lower().rstrip(".")
+                if host:
+                    self._cdn_fronted_hosts.add(host)
+            return
+
+        if etype != "IP":
+            return
+        ip = (getattr(d, "address", "") or "").strip()
+        if not ip:
+            return
+        host = (getattr(d, "resolved_from", "") or "").strip().lower().rstrip(".")
+
+        from recon.cdncheck import cdn_provider_for_ip
+        provider = cdn_provider_for_ip(ip)
+        if provider is None and host and host in self._cdn_fronted_hosts:
+            provider = "cdn-cname"
+        if provider is not None and not self._scan_cdn_ips:
+            log.info("resolved-IP scan: skipping CDN/cloud IP %s (%s) from %s "
+                     "— use --scan-cdn-ips to override", ip, provider, host or "?")
+            return
+        if self._scope_engine.authorize_ip(ip):
+            log.info("resolved-IP scan: authorized %s (resolved from %s) for port scanning",
+                     ip, host or "?")
 
     @staticmethod
     def _candidate_from(event: Event) -> str:

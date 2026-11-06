@@ -33,8 +33,25 @@ class ScopeEngine:
 
     def __init__(self, scope: Scope) -> None:
         self._scope = scope
+        # Runtime operator-authorized IPs (e.g. resolved IPs of in-scope hosts
+        # that the operator opted to port-scan). Added via authorize_ip(); still
+        # subordinate to DENY and the distance bound (checked only at the ALLOW
+        # step), so an out-scope rule or the recursion bound always wins.
+        self._authorized_ips: set = set()
 
     # -- public API --------------------------------------------------------
+
+    def authorize_ip(self, ip: str) -> bool:
+        """Authorize a single IP as in-scope at runtime (operator decision).
+
+        Returns True if `ip` parsed and is now authorized. Does NOT override a
+        DENY rule or the distance bound — evaluate() still runs those first.
+        """
+        try:
+            self._authorized_ips.add(ipaddress.ip_address(str(ip).strip()))
+            return True
+        except ValueError:
+            return False
 
     def evaluate(self, candidate: str, source_distance: int = 0) -> ScopeDecision:
         """Return an IN/OUT decision for one candidate.
@@ -85,6 +102,15 @@ class ScopeEngine:
                     f"distance {distance} exceeds max_distance "
                     f"{self._scope.max_distance}"
                 ),
+            )
+
+        # Step 3a: operator-authorized IPs (resolved IPs of in-scope hosts the
+        # operator opted to scan). After DENY + DISTANCE, so those still win.
+        if kind is RuleKind.CIDR and ip_obj in self._authorized_ips:
+            return ScopeDecision(
+                status=ScopeStatus.IN,
+                distance=distance,
+                reason="operator-authorized resolved IP",
             )
 
         # Step 3: require a positive allow match.

@@ -280,6 +280,17 @@ def scan(
              "chrome-android, firefox-windows, safari-mac, off, random "
              "(random is deterministic from the scan id).",
     ),
+    scan_resolved_ips: bool = typer.Option(
+        True, "--scan-resolved-ips/--no-scan-resolved-ips",
+        help="Port-scan the IPs that in-scope hosts resolve to (active/full only). "
+             "On by default; CDN/cloud edge IPs are skipped unless --scan-cdn-ips.",
+    ),
+    scan_cdn_ips: bool = typer.Option(
+        False, "--scan-cdn-ips",
+        help="Also port-scan resolved IPs in CDN/cloud edge ranges (CloudFront, "
+             "Cloudflare, …). Off by default — scanning shared provider infra is "
+             "out of authorization; only enable for an IP you are authorized to scan.",
+    ),
     debug: bool = typer.Option(
         False, "--debug",
         help="Write verbose structured diagnostics (events/errors/http JSONL) under "
@@ -500,6 +511,8 @@ def scan(
         workers=workers,
         module_concurrency=module_concurrency,
         hybrid_targets=hybrid_targets,
+        scan_resolved_ips=scan_resolved_ips,
+        scan_cdn_ips=scan_cdn_ips,
     )
 
     try:
