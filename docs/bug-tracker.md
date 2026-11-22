@@ -48,17 +48,33 @@ Status legend: 🔴 OPEN · 🟡 IN PROGRESS · 🟢 FIXED (uncommitted) · ✅ 
   record the real mode. A backfill is only worth it if historical `mode` accuracy
   matters.
 
-## BUG-003 — Plan board is target-level only under `--hybrid` (no per-module chips)
+## BUG-003 — Plan board was target-level only (no per-module chips)
 
-- **Status:** ⚪ BY-DESIGN (limitation, not a defect — candidate for Phase 2.5)
-- **Severity:** N/A (expected behaviour; logged so it isn't re-investigated as a bug)
+- **Status:** 🟢 FIXED (uncommitted — Phase 2.5, per-module progress for all scans)
+- **Severity:** Low (observability gap, not a correctness defect)
 - **Found:** 2026-11-22, Map/Plan live test.
-- **Area:** `scheduler/` integration (hybrid runs `ModuleSpec("pipeline")` — one
-  "pipeline" job per target; the EventBus owns module ordering), surfaced in
-  `api/plan.py` + `frontend/src/pages/Plan.tsx`.
-- **Symptom:** The Plan board shows each target plus a single `pipeline` module chip,
-  not one chip per recon module. This is correct for how the hybrid engine models
-  jobs today.
-- **Would-be fix (Phase 2.5):** model each module as its own scheduler job so the
-  Plan board can show per-module lifecycle. Non-trivial — changes the hybrid job
-  granularity. Deferred pending user direction.
+- **Area:** `controller/controller.py`, `database/persister.py`, `api/plan.py`,
+  `frontend/src/pages/Plan.tsx`.
+- **Symptom:** The Plan board showed each target plus a single `pipeline` module
+  chip. The hybrid engine runs `ModuleSpec("pipeline")` (one job per target; the
+  EventBus owns real module order), so no per-module state was ever recorded.
+- **Fix (without breaking the "bus owns module order" invariant):** record real
+  per-(target, module) progress from the **single reactive-dispatch chokepoint**
+  (`_handler`), not by re-modelling modules as scheduler jobs. A module is marked
+  RUNNING on first dispatch for a host, FAILED if it raises, and flipped to
+  COMPLETED at scan end (`_finalize_module_progress` — a reactive module is only
+  "done" with a host once the cascade settles). Each transition emits a live
+  `plan` frame (via the existing scheduler-listener fan-out) **and** upserts a
+  `JobRecord(kind="module")` keyed `module:<target>:<module>` (new
+  `Persister.record_module_job`), so progress survives reloads and shows on
+  finished scans. `build_plan` drops the synthetic `pipeline` chip and rolls a
+  target's state up from its modules when there's no TARGET job.
+- **Bonus:** because the chokepoint is shared, **default (non-hybrid) scans now
+  populate the Plan board too** — the original Phase 2.5 goal. No scope / rate-limit
+  / planner behaviour changed (observe-only).
+- **Tests:** pipeline-drop + derived target state, persister upsert (one evolving
+  row), controller progress tracking + finalize. Full suite 1037 passed; frontend
+  typecheck + build clean.
+- **Not done (future):** live end-to-end verification of the stream on an
+  authorized target (unit-covered; the WS→board wiring was verified live for the
+  hybrid scheduler path on 2026-11-22).

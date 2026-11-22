@@ -121,6 +121,9 @@ class ScanController:
         # monitor registers one). They can never affect scheduling — a raising
         # listener is swallowed in _on_scheduler_event.
         self._scheduler_listeners: list = []
+        # Per-(target, module) execution state for the Plan board, tracked from the
+        # reactive-dispatch chokepoint (works for both default and hybrid scans).
+        self._module_runs: dict[tuple[str, str], str] = {}
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
         # Central capability policy — fail-closed on an invalid mode.
@@ -561,6 +564,7 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
         await self._bus.drain()
+        await self._finalize_module_progress()
 
         # Unified §12 report (printed now; persisted jobs/events carry the rest).
         diag_dir = getattr(self._diagnostics, "directory", None)
@@ -608,6 +612,64 @@ class ScanController:
                 await cb(name, payload)
             except Exception as exc:
                 log.debug("scheduler listener failed for %s: %s", name, exc)
+
+    # ── per-(target, module) progress for the Plan board ──────────────────────
+    # The hybrid scheduler persists only one 'pipeline' job per target; the real
+    # module activity happens in the reactive cascade. We track it here at the
+    # single dispatch chokepoint so BOTH default and hybrid scans light up the
+    # Plan board, surviving reloads (persisted) and streaming live. Observe-only:
+    # it never gates dispatch, scope, or rate limiting.
+
+    def _event_target(self, event: Event) -> str:
+        """Normalized host an event pertains to (the Plan board's target key)."""
+        return (self._candidate_from(event) or "").strip().lower().rstrip(".")
+
+    async def _emit_module_progress(
+        self, name: str, target: str, module: str, status: str,
+        *, error: str | None = None,
+    ) -> None:
+        payload: dict = {"target": target, "module": module, "status": status}
+        if error:
+            payload["error"] = error
+        for cb in self._scheduler_listeners:          # live fan-out (web monitor)
+            try:
+                await cb(name, payload)
+            except Exception as exc:
+                log.debug("module-progress listener failed: %s", exc)
+        if self._persister:                            # persist so it survives reload
+            try:
+                await self._persister.record_module_job(
+                    self._scan_id, target, module, status, error=error)
+            except Exception as exc:
+                log.debug("module-progress persist failed: %s", exc)
+
+    async def _note_module_running(self, module: str, event: Event) -> None:
+        target = self._event_target(event)
+        if not target:
+            return
+        key = (target, module)
+        if self._module_runs.get(key):                 # already RUNNING/FAILED — don't thrash
+            return
+        self._module_runs[key] = "RUNNING"
+        await self._emit_module_progress("module_started", target, module, "RUNNING")
+
+    async def _note_module_failed(self, module: str, event: Event, exc: Exception) -> None:
+        target = self._event_target(event)
+        if not target:
+            return
+        self._module_runs[(target, module)] = "FAILED"
+        await self._emit_module_progress(
+            "module_failed", target, module, "FAILED", error=str(exc)[:500])
+
+    async def _finalize_module_progress(self) -> None:
+        """At scan end, flip every still-RUNNING (target, module) to COMPLETED —
+        a reactive module is 'done' with a host only once the cascade has settled.
+        FAILED entries are left as-is. Never raises."""
+        for (target, module), state in list(self._module_runs.items()):
+            if state == "RUNNING":
+                self._module_runs[(target, module)] = "COMPLETED"
+                await self._emit_module_progress(
+                    "module_completed", target, module, "COMPLETED")
 
     async def _live_result_writer(self, domain: str, interval: float = 10.0) -> None:
         """Periodically flush the aggregator's current tree to results/<domain>/latest/
@@ -854,10 +916,12 @@ class ScanController:
                     if not dec.run:
                         log.debug("[plan] skip %s", dec.explain())
                         return
+                    await self._note_module_running(m.name, event)
                     try:
                         await m.handle_event(event)
                     except Exception as exc:
                         log.error("module %s raised on %s: %s", m.name, event.type, exc)
+                        await self._note_module_failed(m.name, event, exc)
 
                 self._bus.subscribe(etype, _handler)
 
@@ -938,6 +1002,7 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
         await self._bus.drain()
+        await self._finalize_module_progress()
 
         # Phase 3a: LLM correlation & intelligence (works without a DB — operates
         # on the aggregator's in-memory structured evidence, attached to the writer).

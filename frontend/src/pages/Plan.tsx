@@ -99,7 +99,11 @@ export default function Plan() {
   // Fold live scheduler frames in.
   useEffect(() => {
     const fresh = state.events.filter(
-      (f) => f.kind === "plan" && f.seq > processedSeq.current && f.target
+      (f) =>
+        f.kind === "plan" &&
+        f.seq > processedSeq.current &&
+        f.target &&
+        (f.module ?? "") !== "pipeline" // synthetic hybrid rollup job — not a real module
     );
     if (fresh.length === 0) return;
     processedSeq.current = Math.max(processedSeq.current, ...state.events.map((f) => f.seq));
@@ -193,10 +197,11 @@ export default function Plan() {
       ) : !isHybrid && targets.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No per-module execution plan recorded for this scan.
+            No per-module execution plan recorded for this scan yet.
             <br />
-            Per-target / per-module job state is tracked for <span className="font-mono">--hybrid</span>{" "}
-            scans; run with the hybrid engine to populate this board.
+            Per-(target, module) job state is recorded as the reactive cascade runs;
+            it populates once network modules execute (or immediately under{" "}
+            <span className="font-mono">--hybrid</span>).
           </CardContent>
         </Card>
       ) : (
