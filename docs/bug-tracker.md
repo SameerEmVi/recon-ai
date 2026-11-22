@@ -7,7 +7,7 @@ Status legend: 🔴 OPEN · 🟡 IN PROGRESS · 🟢 FIXED (uncommitted) · ✅ 
 
 ## BUG-001 — Hybrid scan path never backfilled `target_domain` to the DB
 
-- **Status:** 🟢 FIXED (uncommitted — on `feature/recon-intelligence-subsystems`, part of the Map/Plan work)
+- **Status:** ✅ FIXED & COMMITTED (`61fcc22`, `feature/recon-intelligence-subsystems`)
 - **Severity:** Medium (data integrity / UI)
 - **Found:** 2026-11-22, live test on authorized `hackycorp.com` during Map/Plan feature verification.
 - **Area:** `controller/controller.py` (scan lifecycle, hybrid path)
@@ -25,21 +25,28 @@ Status legend: 🔴 OPEN · 🟡 IN PROGRESS · 🟢 FIXED (uncommitted) · ✅ 
   `target_domain='hackycorp.com'`; Map regained its domain anchor + `subdomain`
   edge to `assets.hackycorp.com`. 72 controller/scheduler/graph/plan tests green.
 
-## BUG-002 — DB scan row stores legacy `mode:"A"/"B"` instead of the recon `--mode`
+## BUG-002 — DB scan row stored legacy `mode:"A"/"B"` instead of the recon `--mode`
 
-- **Status:** 🔴 OPEN (pre-existing, unfixed — flagged for a decision)
-- **Severity:** Low (cosmetic, but may muddy history/diff semantics)
+- **Status:** 🟢 FIXED (uncommitted — option (a), repurposed per design)
+- **Severity:** Low (cosmetic, but muddied history/diff semantics)
 - **Found:** 2026-11-22, inspecting the hackycorp scan row during the Map/Plan test.
-- **Area:** `controller/controller.py` (~line 744, the A/B persistence code)
-- **Symptom:** The persisted scan row's `mode` field is `"A"` (no-AI) / `"B"` (AI),
+- **Area:** `controller/controller.py` (scan_start persistence), `database/models.py`
+- **Symptom:** The persisted scan row's `mode` field was `"A"` (no-AI) / `"B"` (AI),
   a legacy A/B-test code — **not** the recon execution mode
-  (`osint/active/vuln/full`). The in-memory scan list (API) correctly reports the
-  real mode (e.g. `"full"`), so the DB value and the live value disagree.
-- **Impact:** Every DB-reading assembler surfaces `"A"/"B"` for `mode`. No functional
-  break observed, but anything keying history/diff on `mode` sees the wrong value.
-- **Next action (needs user call):** decide whether to (a) repurpose the column to
-  the real recon mode, (b) add a separate column, or (c) leave as-is and document.
-  Not fixed autonomously — it touches persisted-row semantics (history/diff).
+  (`osint/active/vuln/full`). The in-memory scan list (API) correctly reported the
+  real mode (e.g. `"full"`), so the DB value and the live value disagreed. Every
+  DB-reading assembler (overview/assets/vulns/graph/plan + CLI `history` + MCP)
+  surfaced `"A"/"B"`.
+- **Fix (option a — repurpose per design):** persist `self._mode` (the real recon
+  mode) on the scan row. Mode is the capability ceiling; whether AI ran is an
+  **orthogonal** axis, still recorded in the `AiAssessment` table — so no signal is
+  lost. Verified no code branched on the `"A"/"B"` value (all readers only display
+  it). Model default changed `"A"` → `"active"`; module docstring + startup log line
+  updated to separate mode from the AI flag.
+- **Note on existing rows:** old sqlite rows written before this fix keep their
+  `"A"/"B"` value (no Alembic migration path — see QA checklist §7); new scans
+  record the real mode. A backfill is only worth it if historical `mode` accuracy
+  matters.
 
 ## BUG-003 — Plan board is target-level only under `--hybrid` (no per-module chips)
 

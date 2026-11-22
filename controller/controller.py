@@ -1,9 +1,9 @@
 """
 ScanController — owns the scan lifecycle.
 
-Mode A (--no-ai, default): deterministic modules only.
-Mode B (--ai):             same modules + AI triage after enumeration.
-Mode B+agent:              same + constrained agent loop.
+Execution mode (--mode, persisted on the scan row): osint | active | vuln | full
+  — the capability ceiling, orthogonal to AI. AI is opt-in on top of any mode:
+  --no-ai (default) = deterministic; --ai = + AI triage; --agent = + agent loop.
 
 Modules are loaded via ModuleRegistry. Two kinds:
   Seed modules     (watched_events=[]) — run in parallel at scan start
@@ -374,12 +374,13 @@ class ScanController:
                 f"seed {seed_domain!r} is not in scope ({decision.reason}) — refusing to scan"
             )
         self._scan_domain = seed_domain
-        mode = "B — AI-assisted" if self._ai_enabled else "A — deterministic"
-        log.info("scan %s | mode %s | seed %s", self._scan_id, mode, seed_domain)
+        ai_note = "AI-assisted" if self._ai_enabled else "deterministic"
+        log.info("scan %s | mode %s (%s) | seed %s",
+                 self._scan_id, self._mode, ai_note, seed_domain)
         log.info("rate limiter: %s", self._rate_limiter.describe())
         from cli import ui
         print(ui.kv("scan-id", self._scan_id))
-        print(ui.kv("mode", mode))
+        print(ui.kv("mode", f"{self._mode} ({ai_note})"))
         print(ui.kv("seed", seed_domain))
         print(ui.kv("rate-lim", self._rate_limiter.describe()))
         print(ui.kv("browser", self._headers.name if self._headers else "off"))
@@ -761,7 +762,9 @@ class ScanController:
             self._scan_id,
             domain="",
             scope_config=scope_config,
-            mode="B" if self._ai_enabled else "A",
+            # Persist the real recon execution mode (osint | active | vuln | full).
+            # Whether AI ran is an orthogonal axis, recorded in AiAssessment.
+            mode=self._mode,
         )
 
     async def _teardown_db(self) -> None:
