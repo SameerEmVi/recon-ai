@@ -173,6 +173,56 @@ export interface AppConfig {
   browser_profiles: string[];
 }
 
+export type GraphKind =
+  | "domain" | "host" | "ip" | "service" | "port"
+  | "tech" | "url" | "finding" | "anomaly" | "email";
+export interface GraphNode {
+  id: string;
+  kind: GraphKind;
+  label: string;
+  // optional, kind-specific
+  status?: number;
+  title?: string;
+  server?: string;
+  url?: string;
+  port?: number;
+  version?: string;
+  category?: string;
+  severity?: string;
+  method?: string;
+  description?: string;
+}
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  rel: string;
+}
+export interface Graph {
+  scan: { scan_id: string; domain: string; status: string; mode: string } | null;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  summary: { nodes: number; edges: number; by_kind: Record<string, number> };
+  truncated: boolean;
+}
+
+export interface PlanModule {
+  module: string;
+  state: string;
+  error: string | null;
+}
+export interface PlanTarget {
+  target: string;
+  state: string | null;
+  modules: PlanModule[];
+}
+export interface Plan {
+  scan: { scan_id: string; domain: string; status: string; mode: string } | null;
+  is_hybrid: boolean;
+  targets: PlanTarget[];
+  summary: { targets: number; modules: number; by_state: Record<string, number> };
+}
+
 export interface Catalog {
   modules: { name: string; description: string; flags: string[] }[];
   modes: string[];
@@ -217,6 +267,10 @@ export const getAssets = (scanId?: string) =>
   apiFetch<Assets>("/api/assets" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
 export const getVulns = (scanId?: string) =>
   apiFetch<Vulns>("/api/vulns" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
+export const getGraph = (scanId?: string) =>
+  apiFetch<Graph>("/api/graph" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
+export const getPlan = (scanId?: string) =>
+  apiFetch<Plan>("/api/plan" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
 export const getDiagnostics = (params: { domain?: string; run_id?: string; stream?: string; module?: string } = {}) => {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
