@@ -187,6 +187,20 @@ class EventRepository:
         )
         return list(result.scalars())
 
+    async def get_all(self, scan_id: UUID, limit: int = 5000) -> list[EventRecord]:
+        """All events for a scan in discovery order (oldest first), capped.
+
+        Oldest-first so a provenance consumer sees a parent before the child that
+        references it. The cap bounds the payload for a huge scan (the graph
+        assembler surfaces truncation to the client)."""
+        result = await self._s.execute(
+            select(EventRecord)
+            .where(EventRecord.scan_job_id == scan_id)
+            .order_by(EventRecord.created_at.asc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
 
 # ── HostRepository ─────────────────────────────────────────────────────────────
 

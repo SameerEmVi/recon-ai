@@ -117,6 +117,10 @@ class ScanController:
         self._hybrid_targets = hybrid_targets
         self._scheduler_report = None
         self._active_scheduler = None   # live HybridScheduler during a hybrid run (for the web monitor)
+        # Observe-only listeners for scheduler lifecycle events (the web live
+        # monitor registers one). They can never affect scheduling — a raising
+        # listener is swallowed in _on_scheduler_event.
+        self._scheduler_listeners: list = []
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
         # Central capability policy — fail-closed on an invalid mode.
@@ -530,6 +534,7 @@ class ScanController:
         # per-host chain (dnsx/httpx_probe/web/…). Seed enumeration modules are
         # not run — the authorized targets ARE the subdomains.
         await self._load_and_setup_modules()
+        await self._persist_scan_domain(seed_domain)   # backfill (same as the default path)
         targets = self._hybrid_targets or [seed_domain]
 
         scheduler = HybridScheduler(
@@ -560,18 +565,48 @@ class ScanController:
         diag_dir = getattr(self._diagnostics, "directory", None)
         print("\n" + scheduler.report_text(proxy=self._proxy, diagnostics_dir=diag_dir))
 
-    async def _on_scheduler_event(self, name: str, payload: dict) -> None:
-        """Fan a scheduler event onto the diagnostics stream (never raises)."""
-        if self._diagnostics is None:
+    async def _persist_scan_domain(self, seed_domain: str) -> None:
+        """Backfill the scan row's target_domain. The row is created with an empty
+        domain at scan_start (the seed isn't known yet there), so both the default
+        and hybrid paths call this once the seed is in hand — otherwise the DB
+        scan row (and every web assembler that reads it) has a blank domain."""
+        if not self._persister:
             return
         try:
-            self._diagnostics.event(
-                "INFO", name, module="scheduler", operation="hybrid",
-                **{k: v for k, v in payload.items()
-                   if k in ("target", "module", "status", "correlation_id")},
+            from sqlalchemy import update
+            from database.models import ScanJob
+            await self._persister._scan_repo._s.execute(
+                update(ScanJob)
+                .where(ScanJob.id == self._scan_id)
+                .values(target_domain=seed_domain)
             )
+            await self._persister._scan_repo._s.commit()
         except Exception as exc:
-            log.debug("scheduler event %s not logged: %s", name, exc)
+            log.debug("persist scan domain failed: %s", exc)
+
+    def add_scheduler_listener(self, callback) -> None:
+        """Register an observe-only async callback `callback(name, payload)` for
+        scheduler lifecycle events (the web live monitor uses this to stream the
+        plan/progress board). Listeners never affect scheduling."""
+        self._scheduler_listeners.append(callback)
+
+    async def _on_scheduler_event(self, name: str, payload: dict) -> None:
+        """Fan a scheduler event onto the diagnostics stream + any registered
+        observers (never raises; an observer failure can't break scheduling)."""
+        if self._diagnostics is not None:
+            try:
+                self._diagnostics.event(
+                    "INFO", name, module="scheduler", operation="hybrid",
+                    **{k: v for k, v in payload.items()
+                       if k in ("target", "module", "status", "correlation_id")},
+                )
+            except Exception as exc:
+                log.debug("scheduler event %s not logged: %s", name, exc)
+        for cb in self._scheduler_listeners:
+            try:
+                await cb(name, payload)
+            except Exception as exc:
+                log.debug("scheduler listener failed for %s: %s", name, exc)
 
     async def _live_result_writer(self, domain: str, interval: float = 10.0) -> None:
         """Periodically flush the aggregator's current tree to results/<domain>/latest/
@@ -849,15 +884,7 @@ class ScanController:
             print("\n" + ui.rule("live events") + "\n")
 
         # Patch DB record with actual domain.
-        if self._persister:
-            from sqlalchemy import update
-            from database.models import ScanJob
-            await self._persister._scan_repo._s.execute(
-                update(ScanJob)
-                .where(ScanJob.id == self._scan_id)
-                .values(target_domain=seed_domain)
-            )
-            await self._persister._scan_repo._s.commit()
+        await self._persist_scan_domain(seed_domain)
 
         # Publish seed event (pre-stamped IN — it's the authorized starting point).
         seed = Event.create(

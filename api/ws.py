@@ -87,20 +87,56 @@ def start_live_monitor(hub: LiveHub, controller, scan_id: str) -> asyncio.Task:
     task (the caller cancels it when the scan ends)."""
     from events.types import EventType
 
+    from api.graph import graph_delta
+
     async def on_event(ev) -> None:
-        await hub.publish({
+        etype = getattr(ev.type, "value", str(ev.type))
+        frame = {
             "kind": "event", "scan_id": scan_id,
-            "type": getattr(ev.type, "value", str(ev.type)),
+            "type": etype,
             "label": getattr(ev, "dedup_key", ""),
             "source": getattr(ev, "source_tool", ""),
             "distance": getattr(ev, "distance", 0),
-        })
+        }
+        # Attach the entity-graph delta (nodes + edges) this event implies, so the
+        # live Map merges it with no client-side graph logic. Same pure helper the
+        # REST /api/graph assembler uses, so the two can never drift. The scan
+        # root is read lazily (this observer subscribes before run() sets it).
+        # Never let a delta failure break the live stream.
+        try:
+            root_domain = getattr(controller, "scan_domain", None)
+            data = ev.data
+            data = data.model_dump() if hasattr(data, "model_dump") else dict(data or {})
+            nodes, edges = graph_delta(etype, data, root_domain)
+            if nodes or edges:
+                frame["graph"] = {"nodes": nodes, "edges": edges}
+        except Exception as exc:
+            log.debug("graph delta failed for %s: %s", etype, exc)
+        await hub.publish(frame)
 
     try:
         for et in EventType:
             controller.bus.subscribe(et, on_event)
     except Exception as exc:                       # observation must never break a scan
         log.debug("live monitor subscribe failed: %s", exc)
+
+    # Plan/progress stream: fan the hybrid scheduler's target/module lifecycle onto
+    # the hub so the Plan board updates live. Observe-only — the controller swallows
+    # a raising listener, so this can never affect scheduling.
+    async def on_scheduler(name: str, payload: dict) -> None:
+        await hub.publish({
+            "kind": "plan", "scan_id": scan_id,
+            "event": name,
+            "target": payload.get("target"),
+            "module": payload.get("module"),
+            "status": payload.get("status"),
+        })
+
+    try:
+        if hasattr(controller, "add_scheduler_listener"):
+            controller.add_scheduler_listener(on_scheduler)
+    except Exception as exc:
+        log.debug("live monitor scheduler hook failed: %s", exc)
 
     async def sampler() -> None:
         try:
