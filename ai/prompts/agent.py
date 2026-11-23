@@ -58,7 +58,60 @@ AGENT_DECISION_TOOL: dict = {
 }
 
 
-def build_agent_prompt(state: AgentState) -> str:
+AGENT_PLAN_TOOL: dict = {
+    "name": "agent_plan",
+    "description": (
+        "Decompose the reconnaissance objective into an ORDERED plan of concrete "
+        "steps. Each step is a single action on a host or URL already observed in "
+        "this scan. The plan is executed top-to-bottom; put the highest-value step "
+        "first. Return 3-8 steps — no filler, no duplicates, no invented targets."
+    ),
+    "input_schema": {
+        "type": "object",
+        "required": ["goal", "steps"],
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "One sentence: the overall objective for this target.",
+            },
+            "steps": {
+                "type": "array",
+                "description": "Ordered list of 3-8 steps, highest-value first.",
+                "items": {
+                    "type": "object",
+                    "required": ["action", "target", "rationale"],
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["probe_url", "fetch_historical_urls", "nuclei_info"],
+                            "description": (
+                                "probe_url — httpx on a specific URL already seen. "
+                                "fetch_historical_urls — passive gau lookup for a hostname. "
+                                "nuclei_info — nuclei info-severity scan on a URL."
+                            ),
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": (
+                                "A subdomain or URL already observed in this scan. "
+                                "Never invent new hostnames."
+                            ),
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "One sentence: why this step is worth doing.",
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def _context_lines(state: AgentState) -> list[str]:
+    """Shared host/finding/history context rendered for both the per-iteration
+    decision prompt and the up-front planning prompt."""
     lines: list[str] = [
         f"Target domain : {_cap(state.target_domain)}",
         f"Iteration     : {state.iteration} / {state.max_iterations}  "
@@ -115,6 +168,11 @@ def build_agent_prompt(state: AgentState) -> str:
                 f"{_cap(ca.summary, 80)}"
             )
 
+    return lines
+
+
+def build_agent_prompt(state: AgentState) -> str:
+    lines = _context_lines(state)
     lines.append(
         "\n## Instructions\n"
         "Choose the single most valuable action given the above.\n"
@@ -125,5 +183,23 @@ def build_agent_prompt(state: AgentState) -> str:
         "All targets must be subdomains or URLs already observed above — "
         "do NOT invent new hostnames."
     )
+    return "\n".join(lines)
 
+
+def build_plan_prompt(state: AgentState) -> str:
+    """Prompt for the up-front planning phase: ask the model for an ordered plan
+    of concrete steps rather than a single next action."""
+    lines = _context_lines(state)
+    lines.append(
+        "\n## Instructions\n"
+        "Produce an ORDERED reconnaissance plan of 3-8 concrete steps.\n"
+        "Each step is one action on a host or URL ALREADY listed above — "
+        "do NOT invent new hostnames.\n"
+        "Order the steps highest-value first: prioritise hosts marked "
+        "importance=high or importance=critical, and surfaces most likely to "
+        "yield new attack surface.\n"
+        "Do not include duplicate action+target pairs. Each step must be real, "
+        "useful work — there is no 'stop' step; simply return fewer steps if "
+        "little is worth doing."
+    )
     return "\n".join(lines)

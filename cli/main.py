@@ -189,6 +189,11 @@ def scan(
         20, "--max-iterations",
         help="Maximum agent iterations (default: 20). Only used with --agent.",
     ),
+    agent_plan: bool = typer.Option(
+        True, "--agent-plan/--no-agent-plan",
+        help="Agent plans the objective into ordered steps first, then works them "
+             "(default: on). --no-agent-plan uses the purely reactive loop. Only with --agent.",
+    ),
     # ── rate limiting ─────────────────────────────────────────────────────────
     rate_limit: float | None = typer.Option(
         None, "--rate-limit", "-r",
@@ -471,6 +476,7 @@ def scan(
         typer.echo(ui.kv("ai-model", ai_model))
     if agent:
         typer.echo(ui.kv("max-iter", max_iterations))
+        typer.echo(ui.kv("agent-plan", "plan→execute" if agent_plan else "reactive"))
 
     api_key = os.environ.get("ANTHROPIC_API_KEY") if ai_effective else None
     if ai_effective and not api_key:
@@ -497,6 +503,7 @@ def scan(
         anthropic_api_key=api_key,
         ai_model=ai_model,
         max_agent_iterations=max_iterations,
+        agent_plan_first=agent_plan,
         rate_limit=rate_limit,
         max_concurrency=max_concurrency,
         plan_mode=plan_mode,

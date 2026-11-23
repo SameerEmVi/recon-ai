@@ -64,6 +64,7 @@ class ScanController:
         anthropic_api_key: str | None = None,
         ai_model: str = "claude-sonnet-4-6",
         max_agent_iterations: int = 20,
+        agent_plan_first: bool = True,   # plan→execute: decompose the goal up front, then work the steps
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
@@ -158,6 +159,7 @@ class ScanController:
         self._anthropic_api_key = anthropic_api_key
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
+        self._agent_plan_first = agent_plan_first
         self._scan_id = uuid.uuid4()
         # Browser header profile — resolved ONCE and kept stable for the whole
         # scan (no per-request rotation). The scan id seeds 'random' so a scan
@@ -1096,6 +1098,25 @@ class ScanController:
         client = anthropic.AsyncAnthropic(api_key=self._anthropic_api_key)
         assessor = Assessor(client, model=self._ai_model)
 
+        # Skill library (optional): feed role-relevant methodology into the loop.
+        # Declared tools/capabilities are intersected with the mode ceiling inside
+        # the selector, so a skill can never widen what the agent may do.
+        skill_library = skill_stats = None
+        mode_caps: set[str] = set()
+        try:
+            import os as _os
+
+            from agentskills import SkillLibrary, SkillStatsStore
+            from policy import get_policy
+
+            skills_dir = _os.environ.get("RECON_AI_SKILLS_DIR", "skills")
+            if _os.path.isdir(skills_dir):
+                skill_library = SkillLibrary(skills_dir)
+                skill_stats = SkillStatsStore(skills_dir)
+            mode_caps = set(get_policy(self).allowed_capabilities)
+        except Exception as exc:
+            log.debug("skill library unavailable: %s", exc)
+
         loop = AgentLoop(
             controller=self,
             host_repo=self._persister._host_repo,
@@ -1106,12 +1127,25 @@ class ScanController:
             approval_gate=ApprovalGate(ApprovalMode.AUTO),
             tool_registry=build_tool_registry(self),
             max_iterations=self._max_agent_iterations,
+            skill_library=skill_library,
+            skill_stats=skill_stats,
+            agent_role="worker",
+            mode_capabilities=mode_caps,
+            plan_first=self._agent_plan_first,
         )
 
         from cli import ui
-        print(ui.info(f"agent starting (max_iterations={self._max_agent_iterations})"))
+        _mode = "plan→execute" if self._agent_plan_first else "reactive"
+        print(ui.info(
+            f"agent starting ({_mode}, max_iterations={self._max_agent_iterations})"
+        ))
         try:
             result = await loop.run(self._scan_id, target_domain)
+            if getattr(result, "plan", None) is not None and result.plan.created:
+                print(ui.info(
+                    f"agent plan: {len(result.plan.steps)} step(s) — "
+                    f"{result.plan.pending_count} unrun at stop"
+                ))
             print(
                 f"[recon-ai] agent stopped: reason={result.stop_reason}  "
                 f"iterations={result.iterations}  new_events={result.total_new_events}"
