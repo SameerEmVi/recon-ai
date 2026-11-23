@@ -74,9 +74,13 @@ export default function Settings() {
         <CardHeader><CardTitle>Backend configuration</CardTitle></CardHeader>
         <CardContent>
           {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <div className="space-y-2.5">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="skeleton h-4 w-full" />
+              ))}
+            </div>
           ) : isError || !cfg ? (
-            <p className="text-sm text-critical">Could not load configuration.</p>
+            <p className="animate-fade-in text-sm text-critical">Could not load configuration.</p>
           ) : (
             <div className="divide-y divide-border/50">
               <Row label="Version"><span className="font-mono">{cfg.version}</span></Row>

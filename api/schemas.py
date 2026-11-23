@@ -34,6 +34,9 @@ class ScanCreate(BaseModel):
     hybrid: bool = False
     workers: int = Field(10, ge=1, le=50)
     targets: list[str] | None = Field(None, description="Authorized subdomains for --hybrid.")
+    # Resolved-IP port scanning (active/full only; CDN edges skipped by default).
+    scan_resolved_ips: bool = True
+    scan_cdn_ips: bool = False
     # Misc
     browser_profile: str = "chrome-windows"
     proxy: str | None = None

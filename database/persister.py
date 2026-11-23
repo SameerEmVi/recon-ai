@@ -93,6 +93,30 @@ class Persister:
         async with self._lock:
             return await self._job_repo.list_for_scan(scan_id, state=state)
 
+    async def record_module_job(
+        self, scan_id: UUID, target: str, module: str, state: str,
+        *, error: str | None = None,
+    ) -> None:
+        """Upsert a per-(target, module) MODULE job row for the Plan board — the
+        real module activity the reactive cascade produces (the hybrid scheduler
+        only persists a single 'pipeline' job per target). Keyed stably by
+        module:<target>:<module> so a module's lifecycle is one evolving row.
+        Serialized + never raises into the scan loop."""
+        async with self._lock:
+            try:
+                await self._job_repo.upsert(JobRecord(
+                    scan_job_id=scan_id,
+                    kind="module",
+                    target=target,
+                    module=module,
+                    state=state,
+                    dedup_key=f"module:{target}:{module}",
+                    error=error,
+                ))
+            except Exception as exc:
+                log.debug("db: record_module_job failed (%s) — rolling back", exc)
+                await self._session.rollback()
+
     # ── host table maintenance ─────────────────────────────────────────────────
 
     async def _update_host(self, event: Event) -> None:

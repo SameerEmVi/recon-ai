@@ -306,12 +306,12 @@ def test_nmap_followup_wiring():
     assert "OPEN_PORT" in nmap.watched_events
 
 
-def test_rustscan_not_in_default_full_set():
-    # It is an alternative to naabu, opt-in only, so a full scan does not
-    # port-scan every IP twice.
+def test_rustscan_is_default_port_scanner_naabu_optional():
+    # rustscan is the default port scanner; naabu is the opt-in alternative
+    # (via -m naabu), so a full scan does not port-scan every IP twice.
     from modules.registry import FULL_MODULES
-    assert "rustscan" not in FULL_MODULES
-    assert "naabu" in FULL_MODULES
+    assert "rustscan" in FULL_MODULES
+    assert "naabu" not in FULL_MODULES
 
 
 def test_rustscan_classified_port_scanning():

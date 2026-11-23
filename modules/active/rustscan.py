@@ -9,9 +9,11 @@ and performs `-sV` service/version detection, so service detection is an
 explicit, independently capability-gated follow-up rather than a side effect of
 port discovery.
 
-It is an **alternative** to naabu, not an addition: it is not in the default
-FULL set (so a single scan does not port-scan every IP twice). Select it
-explicitly with `-m rustscan` or the `port-scan` flag.
+It is the **default** port scanner (in the FULL set); naabu is the alternative,
+kept available via `-m naabu`. Only one port scanner runs per scan so a single
+IP is not scanned twice. On a domain-only scope, the IPs that in-scope hosts
+resolve to are authorized for scanning by the controller's resolved-IP path
+(CDN/cloud edges skipped) — that is what feeds this module its `IP` events.
 
 Safety:
   * capability re-check at call time (PORT_SCANNING must be permitted by the

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getToken } from "./auth";
 
 export interface LiveFrame {
-  kind: "event" | "stats" | "lifecycle";
+  kind: "event" | "stats" | "lifecycle" | "plan";
   seq: number;
   scan_id?: string;
   ts?: string;
@@ -10,6 +10,14 @@ export interface LiveFrame {
   type?: string;
   label?: string;
   source?: string;
+  // plan (hybrid scheduler lifecycle) — event name + target/module/status
+  target?: string;
+  module?: string;
+  status?: string;
+  // Entity-graph delta for the live Map. Kept structural so the transport layer
+  // stays independent of the API domain types; the Map page casts to GraphNode/
+  // GraphEdge at the point of use.
+  graph?: { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] };
   // lifecycle
   event?: string;
   domain?: string;

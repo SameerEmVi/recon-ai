@@ -30,7 +30,12 @@ export default function Monitor() {
         <h1 className="text-lg font-semibold tracking-tight">Live Monitor</h1>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className={cn("h-2 w-2 rounded-full", connected ? "bg-success" : "bg-critical")} />
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full transition-colors",
+                connected ? "bg-success text-success pulse-ring" : "bg-critical"
+              )}
+            />
             {connected ? "streaming" : "disconnected"}
           </div>
           <Select value={scanId} onChange={(e) => setScanId(e.target.value)} className="w-64">
@@ -45,10 +50,10 @@ export default function Monitor() {
       </div>
 
       {!scanId ? (
-        <p className="text-sm text-muted-foreground">Select a scan to monitor.</p>
+        <p className="animate-fade-in text-sm text-muted-foreground">Select a scan to monitor.</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <StatTile label="Requests" value={lim?.requests ?? "—"} />
             <StatTile label="Backoff ×" value={lim?.penalty ?? "—"}
               accent={lim && lim.penalty > 1 ? "warning" : undefined} />
@@ -59,9 +64,9 @@ export default function Monitor() {
               accent={(terminal["FAILED"] ?? 0) ? "critical" : undefined} />
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="stagger grid gap-4 lg:grid-cols-3">
             {/* WAF / rate-limit */}
-            <Card>
+            <Card className="hover-lift">
               <CardHeader><CardTitle>WAF / rate-limit</CardTitle></CardHeader>
               <CardContent className="space-y-2 text-xs">
                 <div className="flex flex-wrap gap-1.5">
@@ -86,16 +91,26 @@ export default function Monitor() {
             </Card>
 
             {/* Live event stream */}
-            <Card className="lg:col-span-2">
-              <CardHeader><CardTitle>Live event stream</CardTitle></CardHeader>
+            <Card className="hover-lift lg:col-span-2">
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle>Live event stream</CardTitle>
+                {state.events.length > 0 && (
+                  <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                    {state.events.length} buffered
+                  </span>
+                )}
+              </CardHeader>
               <CardContent className="max-h-80 space-y-1 overflow-auto">
                 {state.events.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
+                  <p className="animate-fade-in text-sm text-muted-foreground">
                     Waiting for events… (if the scan has finished, there may be none to stream)
                   </p>
                 ) : (
-                  state.events.map((e, i) => (
-                    <div key={`${e.seq}-${i}`} className="flex items-center gap-2 text-xs">
+                  state.events.map((e) => (
+                    <div
+                      key={e.seq}
+                      className="flex animate-slide-in-right items-center gap-2 rounded px-1 py-0.5 text-xs transition-colors hover:bg-accent/40"
+                    >
                       {e.kind === "lifecycle" ? (
                         <Badge variant="outline" className="shrink-0">lifecycle</Badge>
                       ) : (

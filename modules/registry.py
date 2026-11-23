@@ -92,7 +92,9 @@ FULL_MODULES = (
     + RELATED_MODULES
     + DEEP_DNS_MODULES
     + WEB_MODULES
-    + ["naabu", "nmap"]
+    # rustscan is the default port scanner (naabu stays available via -m naabu);
+    # nmap reacts to the discovered OPEN_PORTs for -sV service detection.
+    + ["rustscan", "nmap"]
     + CRAWL_MODULES
     + DISCOVERY_MODULES
     + CLOUD_MODULES
@@ -127,7 +129,7 @@ SCAN_PROFILES: dict[str, dict[str, Any]] = {
         ),
         "modules": FULL_MODULES,
         "module_config": {
-            "naabu":   {"ports": "full"},
+            "rustscan": {"ports": "full"},
             "nuclei":  {"severity": "info,low,medium,high,critical"},
             "ffuf":    {"wordlist": "big", "recursion": True, "recursion_depth": 3},
             "extfuzz": {

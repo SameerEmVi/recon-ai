@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input, Textarea, Select, Field } from "@/components/ui/field";
+import { useToast } from "@/components/ui/toast";
 
 const lines = (s: string): string[] | undefined => {
   const arr = s.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -24,6 +25,7 @@ function statusVariant(s: string): "success" | "warning" | "critical" | "default
 
 function NewScanForm({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
+  const toast = useToast();
   const { data: catalog } = useQuery({ queryKey: ["catalog"], queryFn: getCatalog, staleTime: 60_000 });
   const [domain, setDomain] = useState("");
   const [mode, setMode] = useState("active");
@@ -43,10 +45,14 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
 
   const mutation = useMutation({
     mutationFn: (body: ScanCreateBody) => createScan(body),
-    onSuccess: () => {
+    onSuccess: (_res, body) => {
       qc.invalidateQueries({ queryKey: ["scans"] });
       qc.invalidateQueries({ queryKey: ["overview"] });
+      toast.success("Scan started", `${body.domain} · ${body.mode} mode`);
       onClose();
+    },
+    onError: (e) => {
+      toast.error("Scan could not start", e instanceof ApiError ? e.message : "Request failed");
     },
   });
 
@@ -74,10 +80,10 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
   const err = mutation.error instanceof ApiError ? mutation.error.message : null;
 
   return (
-    <Card>
+    <Card className="animate-scale-in">
       <CardHeader className="flex-row items-center justify-between">
         <CardTitle>New scan</CardTitle>
-        <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+        <button onClick={onClose} className="text-muted-foreground transition-colors hover:text-foreground">
           <X className="h-4 w-4" />
         </button>
       </CardHeader>
@@ -186,15 +192,27 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
 
 function ScanTable() {
   const qc = useQueryClient();
+  const toast = useToast();
   const { data, isLoading } = useQuery({
     queryKey: ["scans"], queryFn: listScans, refetchInterval: 5_000,
   });
   const cancel = useMutation({
     mutationFn: (id: string) => cancelScan(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["scans"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["scans"] });
+      toast.info("Scan cancelled");
+    },
+    onError: () => toast.error("Could not cancel scan"),
   });
 
-  if (isLoading) return <p className="text-sm text-muted-foreground">Loading scans…</p>;
+  if (isLoading)
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="skeleton h-11 w-full rounded-md" />
+        ))}
+      </div>
+    );
   const scans = data ?? [];
   if (scans.length === 0)
     return <p className="text-sm text-muted-foreground">No scans yet. Start one above.</p>;
@@ -214,10 +232,17 @@ function ScanTable() {
         </thead>
         <tbody>
           {scans.map((s) => (
-            <tr key={s.scan_id} className="border-t border-border">
+            <tr key={s.scan_id} className="border-t border-border transition-colors hover:bg-accent/40">
               <td className="px-3 py-2 font-medium text-foreground">{s.domain}</td>
               <td className="px-3 py-2 text-muted-foreground">{s.mode}</td>
-              <td className="px-3 py-2"><Badge variant={statusVariant(s.status)}>{s.status}</Badge></td>
+              <td className="px-3 py-2">
+                <Badge variant={statusVariant(s.status)}>
+                  {s.status === "running" && (
+                    <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-success pulse-ring align-middle text-success" />
+                  )}
+                  {s.status}
+                </Badge>
+              </td>
               <td className="px-3 py-2 tabular-nums text-muted-foreground">{s.event_count}</td>
               <td className="px-3 py-2 text-xs text-muted-foreground">
                 {s.created_at ? new Date(s.created_at).toLocaleString() : "—"}

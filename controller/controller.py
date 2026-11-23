@@ -1,9 +1,9 @@
 """
 ScanController — owns the scan lifecycle.
 
-Mode A (--no-ai, default): deterministic modules only.
-Mode B (--ai):             same modules + AI triage after enumeration.
-Mode B+agent:              same + constrained agent loop.
+Execution mode (--mode, persisted on the scan row): osint | active | vuln | full
+  — the capability ceiling, orthogonal to AI. AI is opt-in on top of any mode:
+  --no-ai (default) = deterministic; --ai = + AI triage; --agent = + agent loop.
 
 Modules are loaded via ModuleRegistry. Two kinds:
   Seed modules     (watched_events=[]) — run in parallel at scan start
@@ -64,6 +64,7 @@ class ScanController:
         anthropic_api_key: str | None = None,
         ai_model: str = "claude-sonnet-4-6",
         max_agent_iterations: int = 20,
+        agent_plan_first: bool = True,   # plan→execute: decompose the goal up front, then work the steps
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
@@ -89,6 +90,12 @@ class ScanController:
         workers: int | None = None,             # worker-pool size (default 10 in hybrid)
         module_concurrency: int | None = None,  # per-target concurrency on the shared limiter
         hybrid_targets: list[str] | None = None,  # authorized subdomains to scan concurrently
+        # Resolved-IP port scanning: authorize the IPs that in-scope hosts resolve
+        # to as scan targets (so rustscan/naabu can run). CDN/cloud edge IPs are
+        # skipped unless scan_cdn_ips is set (scanning shared provider infra is
+        # out of authorization). Applies in active/full only (PORT_SCANNING gate).
+        scan_resolved_ips: bool = True,
+        scan_cdn_ips: bool = False,
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -111,6 +118,13 @@ class ScanController:
         self._hybrid_targets = hybrid_targets
         self._scheduler_report = None
         self._active_scheduler = None   # live HybridScheduler during a hybrid run (for the web monitor)
+        # Observe-only listeners for scheduler lifecycle events (the web live
+        # monitor registers one). They can never affect scheduling — a raising
+        # listener is swallowed in _on_scheduler_event.
+        self._scheduler_listeners: list = []
+        # Per-(target, module) execution state for the Plan board, tracked from the
+        # reactive-dispatch chokepoint (works for both default and hybrid scans).
+        self._module_runs: dict[tuple[str, str], str] = {}
         from recon.fetch import ResponseCache
         self._response_cache = ResponseCache()
         # Central capability policy — fail-closed on an invalid mode.
@@ -145,6 +159,7 @@ class ScanController:
         self._anthropic_api_key = anthropic_api_key
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
+        self._agent_plan_first = agent_plan_first
         self._scan_id = uuid.uuid4()
         # Browser header profile — resolved ONCE and kept stable for the whole
         # scan (no per-request rotation). The scan id seeds 'random' so a scan
@@ -163,6 +178,12 @@ class ScanController:
         self._summary: dict[str, list] = {}
         self._scan_domain: str | None = None
         self._live = live
+        # Resolved-IP port scanning + its CDN guard.
+        self._scan_resolved_ips = bool(scan_resolved_ips)
+        self._scan_cdn_ips = bool(scan_cdn_ips)
+        # Hosts observed to be CDN/cloud-fronted (via a CNAME to a known CDN),
+        # so their resolved IPs are skipped even if the IP range isn't listed.
+        self._cdn_fronted_hosts: set[str] = set()
         # Modules are loaded lazily in _do_run() (setup() is async).
         self._loaded_modules: list["BaseModule"] = []
 
@@ -176,6 +197,10 @@ class ScanController:
         through here. This is the single scope-enforcement chokepoint.
         """
         candidate = self._candidate_from(event)
+        # Resolved-IP port scanning: note CDN-fronted hosts and (CDN-guarded)
+        # authorize the IPs in-scope hosts resolve to, BEFORE the scope decision,
+        # so an authorized IP evaluates IN and the port scanner can react.
+        self._observe_for_resolved_ip_scan(event)
         decision = self._scope_engine.evaluate(
             candidate, source_distance=max(0, event.distance - 1)
         )
@@ -354,12 +379,13 @@ class ScanController:
                 f"seed {seed_domain!r} is not in scope ({decision.reason}) — refusing to scan"
             )
         self._scan_domain = seed_domain
-        mode = "B — AI-assisted" if self._ai_enabled else "A — deterministic"
-        log.info("scan %s | mode %s | seed %s", self._scan_id, mode, seed_domain)
+        ai_note = "AI-assisted" if self._ai_enabled else "deterministic"
+        log.info("scan %s | mode %s (%s) | seed %s",
+                 self._scan_id, self._mode, ai_note, seed_domain)
         log.info("rate limiter: %s", self._rate_limiter.describe())
         from cli import ui
         print(ui.kv("scan-id", self._scan_id))
-        print(ui.kv("mode", mode))
+        print(ui.kv("mode", f"{self._mode} ({ai_note})"))
         print(ui.kv("seed", seed_domain))
         print(ui.kv("rate-lim", self._rate_limiter.describe()))
         print(ui.kv("browser", self._headers.name if self._headers else "off"))
@@ -514,6 +540,7 @@ class ScanController:
         # per-host chain (dnsx/httpx_probe/web/…). Seed enumeration modules are
         # not run — the authorized targets ARE the subdomains.
         await self._load_and_setup_modules()
+        await self._persist_scan_domain(seed_domain)   # backfill (same as the default path)
         targets = self._hybrid_targets or [seed_domain]
 
         scheduler = HybridScheduler(
@@ -539,23 +566,112 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
         await self._bus.drain()
+        await self._finalize_module_progress()
 
         # Unified §12 report (printed now; persisted jobs/events carry the rest).
         diag_dir = getattr(self._diagnostics, "directory", None)
         print("\n" + scheduler.report_text(proxy=self._proxy, diagnostics_dir=diag_dir))
 
-    async def _on_scheduler_event(self, name: str, payload: dict) -> None:
-        """Fan a scheduler event onto the diagnostics stream (never raises)."""
-        if self._diagnostics is None:
+    async def _persist_scan_domain(self, seed_domain: str) -> None:
+        """Backfill the scan row's target_domain. The row is created with an empty
+        domain at scan_start (the seed isn't known yet there), so both the default
+        and hybrid paths call this once the seed is in hand — otherwise the DB
+        scan row (and every web assembler that reads it) has a blank domain."""
+        if not self._persister:
             return
         try:
-            self._diagnostics.event(
-                "INFO", name, module="scheduler", operation="hybrid",
-                **{k: v for k, v in payload.items()
-                   if k in ("target", "module", "status", "correlation_id")},
+            from sqlalchemy import update
+            from database.models import ScanJob
+            await self._persister._scan_repo._s.execute(
+                update(ScanJob)
+                .where(ScanJob.id == self._scan_id)
+                .values(target_domain=seed_domain)
             )
+            await self._persister._scan_repo._s.commit()
         except Exception as exc:
-            log.debug("scheduler event %s not logged: %s", name, exc)
+            log.debug("persist scan domain failed: %s", exc)
+
+    def add_scheduler_listener(self, callback) -> None:
+        """Register an observe-only async callback `callback(name, payload)` for
+        scheduler lifecycle events (the web live monitor uses this to stream the
+        plan/progress board). Listeners never affect scheduling."""
+        self._scheduler_listeners.append(callback)
+
+    async def _on_scheduler_event(self, name: str, payload: dict) -> None:
+        """Fan a scheduler event onto the diagnostics stream + any registered
+        observers (never raises; an observer failure can't break scheduling)."""
+        if self._diagnostics is not None:
+            try:
+                self._diagnostics.event(
+                    "INFO", name, module="scheduler", operation="hybrid",
+                    **{k: v for k, v in payload.items()
+                       if k in ("target", "module", "status", "correlation_id")},
+                )
+            except Exception as exc:
+                log.debug("scheduler event %s not logged: %s", name, exc)
+        for cb in self._scheduler_listeners:
+            try:
+                await cb(name, payload)
+            except Exception as exc:
+                log.debug("scheduler listener failed for %s: %s", name, exc)
+
+    # ── per-(target, module) progress for the Plan board ──────────────────────
+    # The hybrid scheduler persists only one 'pipeline' job per target; the real
+    # module activity happens in the reactive cascade. We track it here at the
+    # single dispatch chokepoint so BOTH default and hybrid scans light up the
+    # Plan board, surviving reloads (persisted) and streaming live. Observe-only:
+    # it never gates dispatch, scope, or rate limiting.
+
+    def _event_target(self, event: Event) -> str:
+        """Normalized host an event pertains to (the Plan board's target key)."""
+        return (self._candidate_from(event) or "").strip().lower().rstrip(".")
+
+    async def _emit_module_progress(
+        self, name: str, target: str, module: str, status: str,
+        *, error: str | None = None,
+    ) -> None:
+        payload: dict = {"target": target, "module": module, "status": status}
+        if error:
+            payload["error"] = error
+        for cb in self._scheduler_listeners:          # live fan-out (web monitor)
+            try:
+                await cb(name, payload)
+            except Exception as exc:
+                log.debug("module-progress listener failed: %s", exc)
+        if self._persister:                            # persist so it survives reload
+            try:
+                await self._persister.record_module_job(
+                    self._scan_id, target, module, status, error=error)
+            except Exception as exc:
+                log.debug("module-progress persist failed: %s", exc)
+
+    async def _note_module_running(self, module: str, event: Event) -> None:
+        target = self._event_target(event)
+        if not target:
+            return
+        key = (target, module)
+        if self._module_runs.get(key):                 # already RUNNING/FAILED — don't thrash
+            return
+        self._module_runs[key] = "RUNNING"
+        await self._emit_module_progress("module_started", target, module, "RUNNING")
+
+    async def _note_module_failed(self, module: str, event: Event, exc: Exception) -> None:
+        target = self._event_target(event)
+        if not target:
+            return
+        self._module_runs[(target, module)] = "FAILED"
+        await self._emit_module_progress(
+            "module_failed", target, module, "FAILED", error=str(exc)[:500])
+
+    async def _finalize_module_progress(self) -> None:
+        """At scan end, flip every still-RUNNING (target, module) to COMPLETED —
+        a reactive module is 'done' with a host only once the cascade has settled.
+        FAILED entries are left as-is. Never raises."""
+        for (target, module), state in list(self._module_runs.items()):
+            if state == "RUNNING":
+                self._module_runs[(target, module)] = "COMPLETED"
+                await self._emit_module_progress(
+                    "module_completed", target, module, "COMPLETED")
 
     async def _live_result_writer(self, domain: str, interval: float = 10.0) -> None:
         """Periodically flush the aggregator's current tree to results/<domain>/latest/
@@ -710,7 +826,9 @@ class ScanController:
             self._scan_id,
             domain="",
             scope_config=scope_config,
-            mode="B" if self._ai_enabled else "A",
+            # Persist the real recon execution mode (osint | active | vuln | full).
+            # Whether AI ran is an orthogonal axis, recorded in AiAssessment.
+            mode=self._mode,
         )
 
     async def _teardown_db(self) -> None:
@@ -800,10 +918,12 @@ class ScanController:
                     if not dec.run:
                         log.debug("[plan] skip %s", dec.explain())
                         return
+                    await self._note_module_running(m.name, event)
                     try:
                         await m.handle_event(event)
                     except Exception as exc:
                         log.error("module %s raised on %s: %s", m.name, event.type, exc)
+                        await self._note_module_failed(m.name, event, exc)
 
                 self._bus.subscribe(etype, _handler)
 
@@ -833,15 +953,7 @@ class ScanController:
             print("\n" + ui.rule("live events") + "\n")
 
         # Patch DB record with actual domain.
-        if self._persister:
-            from sqlalchemy import update
-            from database.models import ScanJob
-            await self._persister._scan_repo._s.execute(
-                update(ScanJob)
-                .where(ScanJob.id == self._scan_id)
-                .values(target_domain=seed_domain)
-            )
-            await self._persister._scan_repo._s.commit()
+        await self._persist_scan_domain(seed_domain)
 
         # Publish seed event (pre-stamped IN — it's the authorized starting point).
         seed = Event.create(
@@ -892,6 +1004,7 @@ class ScanController:
             except Exception as exc:
                 log.error("module %s finish() raised: %s", module.name, exc)
         await self._bus.drain()
+        await self._finalize_module_progress()
 
         # Phase 3a: LLM correlation & intelligence (works without a DB — operates
         # on the aggregator's in-memory structured evidence, attached to the writer).
@@ -985,6 +1098,25 @@ class ScanController:
         client = anthropic.AsyncAnthropic(api_key=self._anthropic_api_key)
         assessor = Assessor(client, model=self._ai_model)
 
+        # Skill library (optional): feed role-relevant methodology into the loop.
+        # Declared tools/capabilities are intersected with the mode ceiling inside
+        # the selector, so a skill can never widen what the agent may do.
+        skill_library = skill_stats = None
+        mode_caps: set[str] = set()
+        try:
+            import os as _os
+
+            from agentskills import SkillLibrary, SkillStatsStore
+            from policy import get_policy
+
+            skills_dir = _os.environ.get("RECON_AI_SKILLS_DIR", "skills")
+            if _os.path.isdir(skills_dir):
+                skill_library = SkillLibrary(skills_dir)
+                skill_stats = SkillStatsStore(skills_dir)
+            mode_caps = set(get_policy(self).allowed_capabilities)
+        except Exception as exc:
+            log.debug("skill library unavailable: %s", exc)
+
         loop = AgentLoop(
             controller=self,
             host_repo=self._persister._host_repo,
@@ -995,18 +1127,82 @@ class ScanController:
             approval_gate=ApprovalGate(ApprovalMode.AUTO),
             tool_registry=build_tool_registry(self),
             max_iterations=self._max_agent_iterations,
+            skill_library=skill_library,
+            skill_stats=skill_stats,
+            agent_role="worker",
+            mode_capabilities=mode_caps,
+            plan_first=self._agent_plan_first,
         )
 
         from cli import ui
-        print(ui.info(f"agent starting (max_iterations={self._max_agent_iterations})"))
+        _mode = "plan→execute" if self._agent_plan_first else "reactive"
+        print(ui.info(
+            f"agent starting ({_mode}, max_iterations={self._max_agent_iterations})"
+        ))
         try:
             result = await loop.run(self._scan_id, target_domain)
+            if getattr(result, "plan", None) is not None and result.plan.created:
+                print(ui.info(
+                    f"agent plan: {len(result.plan.steps)} step(s) — "
+                    f"{result.plan.pending_count} unrun at stop"
+                ))
             print(
                 f"[recon-ai] agent stopped: reason={result.stop_reason}  "
                 f"iterations={result.iterations}  new_events={result.total_new_events}"
             )
         except Exception as exc:
             log.error("agent loop failed: %s", exc)
+
+    def _observe_for_resolved_ip_scan(self, event: Event) -> None:
+        """Operator opt-in (default-on): authorize the IPs that in-scope hosts
+        resolve to, so the port scanner (rustscan/naabu) can run against them.
+
+        Deny-first and the distance bound are untouched — authorization only
+        reaches the ALLOW step of the scope engine. Gated to modes where port
+        scanning is permitted (active/full), and CDN/cloud edge IPs are skipped
+        unless the operator set scan_cdn_ips (scanning shared provider infra is
+        out of authorization). CDN detection uses the IP range and any CNAME to
+        a known CDN seen for the host.
+        """
+        if not self._scan_resolved_ips:
+            return
+        try:
+            from policy import CAP_PORT_SCANNING
+            if not self._policy.allows(CAP_PORT_SCANNING):
+                return   # no port scanning in this mode → nothing to authorize
+        except Exception:
+            return
+
+        d = event.data
+        etype = event.type.value
+
+        # Track CDN-fronted hosts from CNAME chains (best-effort, before the IP).
+        if etype == "DNS_RECORD" and getattr(d, "record_type", "").upper() == "CNAME":
+            from recon.cdncheck import cdn_provider_for_cname
+            if cdn_provider_for_cname(getattr(d, "value", "") or ""):
+                host = (getattr(d, "hostname", "") or "").strip().lower().rstrip(".")
+                if host:
+                    self._cdn_fronted_hosts.add(host)
+            return
+
+        if etype != "IP":
+            return
+        ip = (getattr(d, "address", "") or "").strip()
+        if not ip:
+            return
+        host = (getattr(d, "resolved_from", "") or "").strip().lower().rstrip(".")
+
+        from recon.cdncheck import cdn_provider_for_ip
+        provider = cdn_provider_for_ip(ip)
+        if provider is None and host and host in self._cdn_fronted_hosts:
+            provider = "cdn-cname"
+        if provider is not None and not self._scan_cdn_ips:
+            log.info("resolved-IP scan: skipping CDN/cloud IP %s (%s) from %s "
+                     "— use --scan-cdn-ips to override", ip, provider, host or "?")
+            return
+        if self._scope_engine.authorize_ip(ip):
+            log.info("resolved-IP scan: authorized %s (resolved from %s) for port scanning",
+                     ip, host or "?")
 
     @staticmethod
     def _candidate_from(event: Event) -> str:

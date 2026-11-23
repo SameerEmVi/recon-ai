@@ -1,11 +1,18 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { PageTransition } from "@/components/PageTransition";
 import {
   LayoutDashboard,
   Crosshair,
   Activity,
+  ListChecks,
+  Share2,
+  Workflow,
   Server,
+  Radio,
   ShieldAlert,
+  Bug,
+  Sparkles,
   ScrollText,
   Settings as SettingsIcon,
   LogOut,
@@ -18,8 +25,14 @@ const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/scans", label: "Scans", icon: Crosshair },
   { to: "/monitor", label: "Live Monitor", icon: Activity },
+  { to: "/plan", label: "Plan & Progress", icon: ListChecks },
+  { to: "/map", label: "Asset Map", icon: Share2 },
+  { to: "/execmap", label: "Tool Execution", icon: Workflow },
+  { to: "/traffic", label: "Traffic", icon: Radio },
   { to: "/assets", label: "Assets", icon: Server },
   { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert },
+  { to: "/findings", label: "Findings", icon: Bug },
+  { to: "/skills", label: "Skills", icon: Sparkles },
   { to: "/diagnostics", label: "Diagnostics", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
@@ -32,13 +45,27 @@ function HealthDot() {
     retry: false,
   });
   const ok = !isError && data?.status === "ok";
+  const live = ok && (data?.active_scans ?? 0) > 0;
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="flex items-center gap-2.5 text-xs text-muted-foreground">
       <span
-        className={cn("h-2 w-2 rounded-full", ok ? "bg-success" : "bg-critical")}
+        className={cn(
+          "h-2 w-2 rounded-full transition-colors",
+          ok ? "bg-success text-success" : "bg-critical",
+          live && "pulse-ring"
+        )}
         aria-label={ok ? "backend connected" : "backend unreachable"}
       />
-      {ok ? `connected · ${data?.active_scans ?? 0} active` : "disconnected"}
+      {ok ? (
+        <span>
+          connected{" "}
+          <span className={cn("tabular-nums", live && "text-success")}>
+            · {data?.active_scans ?? 0} active
+          </span>
+        </span>
+      ) : (
+        "disconnected"
+      )}
     </div>
   );
 }
@@ -53,7 +80,7 @@ export function Layout() {
             RECON<span className="text-primary">-AI</span>
           </span>
         </div>
-        <nav className="flex-1 space-y-0.5 p-2">
+        <nav className="flex-1 space-y-0.5 overflow-y-auto p-2">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
@@ -61,15 +88,30 @@ export function Layout() {
               end={end}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+                  "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-all duration-150",
                   isActive
                     ? "bg-accent text-foreground"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                    : "text-muted-foreground hover:translate-x-0.5 hover:bg-accent/60 hover:text-foreground"
                 )
               }
             >
-              <Icon className="h-4 w-4" />
-              {label}
+              {({ isActive }) => (
+                <>
+                  <span
+                    className={cn(
+                      "absolute left-0 top-1/2 h-0 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-all duration-200",
+                      isActive && "h-5"
+                    )}
+                  />
+                  <Icon
+                    className={cn(
+                      "h-4 w-4 transition-transform duration-150 group-hover:scale-110",
+                      isActive && "text-primary"
+                    )}
+                  />
+                  {label}
+                </>
+              )}
             </NavLink>
           ))}
         </nav>
@@ -93,7 +135,9 @@ export function Layout() {
           </button>
         </header>
         <main className="flex-1 overflow-auto p-6">
-          <Outlet />
+          <PageTransition>
+            <Outlet />
+          </PageTransition>
         </main>
       </div>
     </div>

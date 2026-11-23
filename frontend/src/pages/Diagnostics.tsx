@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Select } from "@/components/ui/field";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/cn";
 
 const STREAMS = ["events", "errors", "http"] as const;
@@ -35,8 +37,14 @@ export default function Diagnostics() {
     refetchInterval: 10_000,
   });
 
+  const toast = useToast();
   const [proxyUrl, setProxyUrl] = useState("http://127.0.0.1:8080");
-  const proxyMut = useMutation({ mutationFn: () => checkProxy(proxyUrl) });
+  const proxyMut = useMutation({
+    mutationFn: () => checkProxy(proxyUrl),
+    onSuccess: (r) =>
+      r.ok ? toast.success("Proxy reachable", r.target) : toast.warning("Proxy unreachable", r.message),
+    onError: () => toast.error("Proxy probe failed"),
+  });
 
   const run = data?.run;
   const runs = data?.available_runs ?? [];
@@ -86,14 +94,14 @@ export default function Diagnostics() {
       </Card>
 
       {!run ? (
-        <p className="text-sm text-muted-foreground">
+        <p className="animate-fade-in text-sm text-muted-foreground">
           No diagnostics found. Run a scan with <span className="font-mono">--debug</span> or a proxy, or set{" "}
           <span className="font-mono">RECON_AI_RESULTS_DIR</span>.
         </p>
       ) : (
         <>
           {/* Error summary */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-4">
             <StatTile label="Total errors" value={run.total_errors}
               accent={run.total_errors ? "critical" : "success"} />
             <StatTile label="Events" value={run.streams?.events ?? 0} />
@@ -104,8 +112,8 @@ export default function Diagnostics() {
 
           {(Object.keys(run.errors_by_category).length > 0 ||
             Object.keys(run.errors_by_module).length > 0) && (
-            <div className="grid gap-4 lg:grid-cols-2">
-              <Card>
+            <div className="stagger grid gap-4 lg:grid-cols-2">
+              <Card className="hover-lift">
                 <CardHeader><CardTitle>Errors by category</CardTitle></CardHeader>
                 <CardContent className="flex flex-wrap gap-1.5">
                   {Object.entries(run.errors_by_category).map(([c, n]) => (
@@ -115,7 +123,7 @@ export default function Diagnostics() {
                     <span className="text-xs text-muted-foreground">none</span>)}
                 </CardContent>
               </Card>
-              <Card>
+              <Card className="hover-lift">
                 <CardHeader><CardTitle>Errors by module</CardTitle></CardHeader>
                 <CardContent className="flex flex-wrap gap-1.5">
                   {Object.entries(run.errors_by_module).map(([m, n]) => (
@@ -148,15 +156,19 @@ export default function Diagnostics() {
 
           <Card>
             <CardHeader><CardTitle className="font-mono">{stream}.jsonl</CardTitle></CardHeader>
-            <CardContent className="max-h-[32rem] overflow-auto">
+            <CardContent key={stream} className="max-h-[32rem] animate-fade-in overflow-auto">
               {isLoading ? (
-                <p className="text-sm text-muted-foreground">Loading…</p>
+                <div className="space-y-1.5">
+                  {Array.from({ length: 12 }).map((_, i) => (
+                    <Skeleton key={i} className="h-4" />
+                  ))}
+                </div>
               ) : records.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No records.</p>
+                <p className="animate-fade-in text-sm text-muted-foreground">No records.</p>
               ) : (
-                <div className="space-y-1">
+                <div className="space-y-0.5">
                   {records.map((r, i) => (
-                    <div key={i} className="flex items-center gap-2 text-[11px]">
+                    <div key={i} className="flex items-center gap-2 rounded px-1 py-0.5 text-[11px] transition-colors hover:bg-accent/40">
                       <span className="shrink-0 font-mono text-muted-foreground/60">
                         {(r.timestamp ?? "").slice(11, 19)}
                       </span>

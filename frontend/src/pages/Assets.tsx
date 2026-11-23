@@ -6,6 +6,7 @@ import { StatTile } from "@/components/StatTile";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input, Select } from "@/components/ui/field";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/cn";
 
 type Tab = "hosts" | "subdomains" | "dns";
@@ -93,7 +94,7 @@ export default function Assets() {
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile label="Hosts" value={sum?.hosts ?? "—"} icon={<Server className="h-4 w-4" />} />
         <StatTile label="Live hosts" value={sum?.live_hosts ?? "—"} icon={<Wifi className="h-4 w-4" />}
           accent={sum?.live_hosts ? "success" : undefined} />
@@ -139,9 +140,13 @@ export default function Assets() {
       </div>
 
       {!scanId ? (
-        <p className="text-sm text-muted-foreground">Select a scan to explore its assets.</p>
+        <p className="animate-fade-in text-sm text-muted-foreground">Select a scan to explore its assets.</p>
       ) : isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading assets…</p>
+        <div className="space-y-2">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-14 w-full rounded-md" />
+          ))}
+        </div>
       ) : (
         <Card>
           <CardHeader>
@@ -151,14 +156,14 @@ export default function Assets() {
                 : `DNS records (${dns.length})`}
             </CardTitle>
           </CardHeader>
-          <CardContent className="max-h-[32rem] overflow-auto">
+          <CardContent key={tab} className="max-h-[32rem] animate-fade-in overflow-auto">
             {tab === "hosts" && (
               hosts.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No matching hosts.</p>
+                <p className="animate-fade-in text-sm text-muted-foreground">No matching hosts.</p>
               ) : (
                 <div className="space-y-2">
                   {hosts.map((h) => (
-                    <div key={h.hostname} className="rounded-md border border-border/60 p-2.5">
+                    <div key={h.hostname} className="rounded-md border border-border/60 p-2.5 transition-colors hover:border-primary/40 hover:bg-accent/30">
                       <div className="flex items-center gap-2">
                         <span className={cn("h-2 w-2 shrink-0 rounded-full", h.live ? "bg-success" : "bg-muted-foreground/40")} />
                         <span className="truncate font-mono text-sm text-foreground">{h.hostname}</span>
@@ -201,7 +206,7 @@ export default function Assets() {
 
             {tab === "subdomains" && (
               subdomains.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No matching subdomains.</p>
+                <p className="animate-fade-in text-sm text-muted-foreground">No matching subdomains.</p>
               ) : (
                 <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
                   {subdomains.map((s) => (
@@ -213,7 +218,7 @@ export default function Assets() {
 
             {tab === "dns" && (
               dns.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No matching DNS records.</p>
+                <p className="animate-fade-in text-sm text-muted-foreground">No matching DNS records.</p>
               ) : (
                 <div className="space-y-1">
                   {dns.map((r, i) => (

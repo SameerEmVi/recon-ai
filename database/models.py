@@ -34,7 +34,8 @@ class ScanJob(SQLModel, table=True):
     target_domain: str = Field(index=True)
     # Stored as JSON: {"in_scope": [...], "out_scope": [...], "max_distance": N}
     scope_config: Optional[Any] = Field(default=None, sa_column=Column(JSON))
-    mode: str = Field(default="A")           # "A" = deterministic, "B" = AI-assisted
+    mode: str = Field(default="active")      # recon execution mode: osint | active | vuln | full
+    #   (AI-assisted vs deterministic is orthogonal — derivable from AiAssessment rows)
     status: str = Field(default="running")   # running / complete / failed
     event_count: int = Field(default=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -112,6 +113,26 @@ class Finding(SQLModel, table=True):
     evidence: Optional[Any] = Field(default=None, sa_column=Column(JSON))
     source_event_id: Optional[uuid.UUID] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class FindingTriage(SQLModel, table=True):
+    """Operator triage state layered on top of a deterministic `Finding`.
+
+    Kept in its own table so the recon-produced finding stays immutable — this is
+    the human/bug-bounty workflow axis (report stage + note), one row per finding.
+    `report_stage` tracks the submission lifecycle; `verification_override` lets an
+    operator confirm/downgrade a finding's status without the engine ever promoting
+    it (the deterministic-vs-human split, mirroring deterministic-vs-LLM).
+    """
+
+    __tablename__ = "finding_triage"
+
+    finding_id: uuid.UUID = Field(foreign_key="findings.id", primary_key=True)
+    # pending | submitted | accepted | rejected | duplicate | informative | triaged
+    report_stage: str = Field(default="pending", index=True)
+    verification_override: Optional[str] = Field(default=None)   # operator-set status
+    note: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ── VocabularyItem (persistent reconnaissance learning system) ──────────────────

@@ -107,6 +107,8 @@ class ScanManager:
             hybrid=cfg.hybrid,
             workers=cfg.workers,
             hybrid_targets=cfg.targets,
+            scan_resolved_ips=cfg.scan_resolved_ips,
+            scan_cdn_ips=cfg.scan_cdn_ips,
             browser_profile=cfg.browser_profile,
             proxy=ProxyConfig.from_sources(cli_proxy=cfg.proxy),
             results_enabled=True,

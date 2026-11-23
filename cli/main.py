@@ -189,6 +189,11 @@ def scan(
         20, "--max-iterations",
         help="Maximum agent iterations (default: 20). Only used with --agent.",
     ),
+    agent_plan: bool = typer.Option(
+        True, "--agent-plan/--no-agent-plan",
+        help="Agent plans the objective into ordered steps first, then works them "
+             "(default: on). --no-agent-plan uses the purely reactive loop. Only with --agent.",
+    ),
     # ── rate limiting ─────────────────────────────────────────────────────────
     rate_limit: float | None = typer.Option(
         None, "--rate-limit", "-r",
@@ -279,6 +284,17 @@ def scan(
              "stable throughout. Choices: chrome-windows (default), chrome-mac, "
              "chrome-android, firefox-windows, safari-mac, off, random "
              "(random is deterministic from the scan id).",
+    ),
+    scan_resolved_ips: bool = typer.Option(
+        True, "--scan-resolved-ips/--no-scan-resolved-ips",
+        help="Port-scan the IPs that in-scope hosts resolve to (active/full only). "
+             "On by default; CDN/cloud edge IPs are skipped unless --scan-cdn-ips.",
+    ),
+    scan_cdn_ips: bool = typer.Option(
+        False, "--scan-cdn-ips",
+        help="Also port-scan resolved IPs in CDN/cloud edge ranges (CloudFront, "
+             "Cloudflare, …). Off by default — scanning shared provider infra is "
+             "out of authorization; only enable for an IP you are authorized to scan.",
     ),
     debug: bool = typer.Option(
         False, "--debug",
@@ -460,6 +476,7 @@ def scan(
         typer.echo(ui.kv("ai-model", ai_model))
     if agent:
         typer.echo(ui.kv("max-iter", max_iterations))
+        typer.echo(ui.kv("agent-plan", "plan→execute" if agent_plan else "reactive"))
 
     api_key = os.environ.get("ANTHROPIC_API_KEY") if ai_effective else None
     if ai_effective and not api_key:
@@ -486,6 +503,7 @@ def scan(
         anthropic_api_key=api_key,
         ai_model=ai_model,
         max_agent_iterations=max_iterations,
+        agent_plan_first=agent_plan,
         rate_limit=rate_limit,
         max_concurrency=max_concurrency,
         plan_mode=plan_mode,
@@ -500,6 +518,8 @@ def scan(
         workers=workers,
         module_concurrency=module_concurrency,
         hybrid_targets=hybrid_targets,
+        scan_resolved_ips=scan_resolved_ips,
+        scan_cdn_ips=scan_cdn_ips,
     )
 
     try:

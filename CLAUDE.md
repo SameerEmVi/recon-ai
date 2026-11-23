@@ -282,6 +282,82 @@ setting and no module opens an unconfigured client — the former per-module
   and `diagnostics --proxy-check <url>` (connectivity test, no scan). MCP
   `start_scan` takes a `proxy` arg. Burp setup is in INSTALL.md.
 
+## Coherent browser header profiles (`net/headers.py`)
+
+Outbound requests present a **coherent, stock real-browser header fingerprint**
+instead of the default `python-httpx` / httpx-binary User-Agent that WAF/CDN rules
+filter on sight. One `HeaderProfile` is chosen per scan (owned by `ScanController`,
+exposed as `controller.headers`) and applied by `BaseModule.http_client()` and the
+httpx-binary prober (via `profile.cli_args("-H")`) to **every** outbound request.
+It changes how the client *presents*, never what it is authorized to reach — it is
+complementary to adaptive WAF backoff, not a replacement.
+
+- **Coherence over randomness.** A profile is ONE internally-consistent set — the
+  headers a real build of that browser actually sends together — stable for the
+  whole scan (per-request rotation reads as robotic). `sec-ch-ua*` client hints
+  live **only** in Chromium profiles; Firefox/Safari must not send them.
+- **No `accept-encoding` on any profile:** httpx only decodes codecs whose libs are
+  installed (gzip/deflate always; brotli/zstd are not), so advertising br/zstd we
+  can't decode would silently break every downstream module — httpx sets its own.
+- **Registry:** `chrome-windows` (default), `chrome-mac`, `chrome-android`,
+  `firefox-windows`, `safari-mac`, plus the selectors `off` and `random` (`random`
+  is deterministic from the scan id, so a scan stays on one fingerprint and reruns
+  reproduce). `resolve()` **fails closed** — an unknown name raises rather than
+  silently falling back.
+- **Scope / non-goals:** generic stock header sets only — no per-person identifiers,
+  no cookies, no auth/trust headers, and specifically **no** `X-Forwarded-For` /
+  `X-Real-IP` / origin-IP spoofing. Never touches the scope engine or policy.
+- **Test-safety:** `get_headers(obj)` returns `obj.headers` only when it's a real
+  `HeaderProfile` (mirrors `net.proxy.get_proxy`), else None — a MagicMock
+  controller keeps httpx's defaults.
+- **CLI:** `--browser-profile <name|off|random>` (default `chrome-windows`,
+  validated fail-closed against the registry).
+
+## Hybrid Parallel Scanning Engine (`scheduler/`, opt-in `--hybrid`)
+
+`scheduler/engine.py::HybridScheduler` (one per scan, owned by `ScanController`,
+exposed as `controller.live_pool_stats` while running) adds **subdomain-level +
+module-level concurrency** over a single bounded worker pool. It **orchestrates,
+it does not re-implement**: scope is enforced through the SAME `ScopeEngine`,
+requests are paced by the SAME shared `RateLimiter` (inside the module runner),
+jobs persist through the SAME `Persister`, and the pool bounds total concurrency
+(**worker count ≠ request budget**). The default scan path is unchanged when
+`--hybrid` is off.
+
+- **Two levels, one pool.** *Subdomain level* — every in-scope target is scheduled
+  independently and concurrently; an out-of-scope target becomes an `OUT_OF_SCOPE`
+  job and never runs; targets are de-duplicated after normalization. *Module level*
+  — per target, independent modules run concurrently while a module with
+  `requires` prerequisites waits for them (a DAG, **validated acyclic at
+  construction** — unknown prereqs and cycles are rejected up front, fail-closed).
+  A failed prerequisite skips its dependents (`CANCELLED`); an independent module
+  failing leaves the target `PARTIAL`, not dead.
+- **WorkerPool** (`scheduler/pool.py`): hard default **10** workers,
+  operator-configurable up to `SAFETY_CEILING=50` (a guardrail against launching a
+  stampede). Bounded priority queue with **backpressure** (`submit()` blocks when
+  full rather than growing without limit), FIFO tie-break by a monotonic sequence
+  (no starvation), **dedup by `job.dedup_key`**, graceful drain + hard cancel
+  (in-flight → `CANCELLED`), and live counters (`stats()`:
+  queued/running/terminal/accepted/deduped).
+- **Scope gate per target.** Before a target's module DAG runs, the child target is
+  `evaluate()`d by the scope engine; a non-IN decision becomes `OUT_OF_SCOPE` and
+  nothing for it ever executes. Per-request scope still applies inside the runner.
+- **WAF handling never bypasses.** `note_waf` / `note_rate_limited` /
+  `note_target_paused` emit evidence events; the **shared limiter's** per-target
+  cooldown does the actual slow-down — the engine never rotates proxies or raises
+  concurrency to get around a block.
+- **Reporting / observability.** `SchedulerReport` tallies targets
+  (completed/partial/failed/out-of-scope), modules (run/ok/failed), duration, pool
+  + limiter stats; `report_text()`/`report_dict()` render it. Job lifecycle is
+  published through an `on_event` hook (TARGET_*/MODULE_*/WAF_*/RATE_LIMIT_* →
+  consumed by the web live monitor) and persisted via `save_job`, neither of which
+  can break scheduling (failures are swallowed to DEBUG).
+- **CLI:** `--hybrid` (enable), `--workers N` (pool size, clamped 1..50),
+  `--targets-file <path>` (authorized-subdomain list, one host per line — each
+  scope-validated, out-of-scope skipped; omit = scan the seed), and
+  `--module-concurrency N` (max simultaneous requests to any ONE host, applies to
+  every scan). `recon-ai scan-status <scan_id>` inspects per-target/per-module jobs.
+
 ## Architecture (BBOT-style, event-driven)
 
 `Event` (12 types in `events/types.py`: SUBDOMAIN, DNS_RECORD, IP, OPEN_PORT,
@@ -332,8 +408,10 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 - Active crawling: **katana** (`modules/active/katana.py` + pure wrapper `recon/katana.py`) watches `HTTP_SERVICE` and crawls each live site in **JSONL mode** (`-j` to stdout, parsed by `parse_katana_jsonl`), which unlocks far more than plain URLs: `-xhr` (XHR request URLs + methods), `-fx` (forms/inputs), `-td` (technologies), `-kb` (knowledge-base page types), `-kf all` (robots.txt/sitemap), `-iqp` (query-param dedup). Emits `URL` (every endpoint), `ENDPOINT` (XHR/non-GET + form actions, with method), `PARAMETER` (form inputs → body/query), and `TECHNOLOGY` (`source="katana"`) — all scope-gated via `self.emit`, re-entering the pipeline (js_intel/secretfinder/etc. react). `-rl` derives from the shared `RateLimiter` (single rate chokepoint, like ffuf's `-rate`), not hard-coded; the whole crawl is one guarded subprocess killed+reaped as a **process tree** on the overall `timeout` (`recon.proc`), and routes through Burp via `-proxy`. `build_command`/`parse_katana_jsonl` are pure + unit-tested against the live v1.8.0 schema. In `CRAWL_MODULES` / `--full`; warn-and-skips without the `katana` binary.
 - Tech fingerprinting: **fingerprint** (`modules/web/fingerprint.py`) watches `HTTP_SERVICE` → `TECHNOLOGY`. There is no bespoke fingerprint DB — httpx's bundled **Wappalyzer** DB is the source: `recon/httpx_wrap.py` runs `httpx -td`, `parse_httpx_json` captures the `tech` array into `HttpServiceData.technologies`, and fingerprint normalizes each (split `Name:version`, best-effort category) → `TECHNOLOGY` with `source="httpx"`. A small regex signature set (server header / title / URL path) is the no-binary fallback (`source="heuristic"`). Optional **whatweb** (`modules/web/whatweb.py` + `normalize.parse_whatweb_json`) is a second source (`source="whatweb"`, warn-and-skips without the binary). `TechnologyData.source` records provenance; dedup is by `host:name:version` (source excluded) so the same tech from multiple tools collapses to one event. All emission goes through the scope gate.
 - Document/image metadata: **metascan** (`modules/web/metascan.py` + pure engine `recon/metadata.py`) watches `URL` and, for URLs whose extension is in `metadata.META_EXTS` (PDF, Office OOXML `.docx/.xlsx/.pptx` + legacy, JPEG/PNG/TIFF), downloads the file (scope-gated, rate-limited, size-capped via its **own** httpx client — it needs bytes, not the shared text cache) and extracts embedded metadata. Backend: **exiftool** if present (`exiftool -json -n`, richest), else the pure-Python fallback (`recon/metadata.py` — EXIF/OOXML/PDF). It keeps only a **sensitive-tag allowlist** (`_EXIFTOOL_MAP`: author/creator/lastModifiedBy/company/producer/software/make/model/artist/GPS/title/created) and **stays silent when a file has only technical tags** (ImageWidth/FileSize/… → no event), so scrubbed web assets produce nothing — that is correct, not a failure. Emits: `TECHNOLOGY` (authoring software, folded in from the former exifmeta module — `creator` needs a software hint so a human name is never emitted as tech), one `document-metadata` `ANOMALY` per file, a `metadata-disclosure` `FINDING_CANDIDATE` when `metadata.sensitive()` fields are present (low), and `EMAIL` for addresses embedded in metadata values. Feeds single-token author/lastModifiedBy values to the learning system as likely usernames. In the `DISCOVERY` group / `--full`. (exiftool install path + stale-PATH note under **Windows toolchain gotchas**.)
-- Port scanning combo: **naabu** discovers open ports fast → **nmap** (`modules/active/nmap.py` + `recon/nmap.py`) watches `OPEN_PORT` and runs `-sV` for service/version → `TECHNOLOGY` events. nmap is `-sV -Pn -n` only (no NSE/OS-detect) unless opted in. naabu defaults to a **CONNECT** scan (`scan_type` option: `connect`|`syn`; SYN needs raw sockets / Npcap+admin on Windows), has an arg-injection guard on the target, and supports `ports: full`. **Every `slow` active tool that should run by default carries `expected_value=HIGH(8)`** — naabu, nmap, rustscan, **nuclei, katana, gowitness**, ffuf, extfuzz. Without it the `slow` flag makes cost HIGH(8) outweigh the default value MEDIUM(3) → score −5 < min_value(0), and the Adaptive Planner silently skips the module in default plan mode (this is what disabled port scanning, and later nuclei/katana/gowitness, until each was given the boost).
-- Port scanning (alternative): **rustscan** (`modules/active/rustscan.py` + pure wrapper `recon/rustscan.py`) is an opt-in alternative to naabu — same `IP → OPEN_PORT` role, so the existing nmap module provides the identical `-sV` follow-up. Capability `PORT_SCANNING` (active/full only). Runs RustScan in **greppable mode** (`-g`) with `--scripts none` + `--no-banner`, so it only prints ports and **never spawns nmap or any script as a side effect** of port discovery — service detection stays the separate, independently-gated nmap module. One target per invocation (`-a <ip>`, never a CIDR), so the authorized range is never expanded; the target IP and every IP in the output are scope-checked (on top of the unconditional emit-time gate). Conservative defaults (batch 1500 vs RustScan's 4500, 2000 ms timeout, top-1000 ports), all tunable via options (`ports`/`batch_size`/`timeout_ms`/`tries`/`ulimit`/`scan_order`/`exclude_ports`). Fail-soft: missing binary / bad args / timeout / non-zero exit / malformed output → empty result, scan continues; `CancelledError` propagates. `build_command`/`parse_greppable` are pure and unit-tested. **Not** in the default FULL set (avoids double-scanning alongside naabu) — select with `-m rustscan`. Warn-and-skips without the `rustscan` binary.
+- Port scanning combo: the **default** scanner **rustscan** (next bullet) discovers open ports → **nmap** (`modules/active/nmap.py` + `recon/nmap.py`) watches `OPEN_PORT` and runs `-sV` for service/version → `TECHNOLOGY` events. **naabu** is the opt-in alternative (`-m naabu`, same `IP→OPEN_PORT` role; removed from the default FULL set so an IP is never scanned twice). nmap is `-sV -Pn -n` only (no NSE/OS-detect) unless opted in. naabu defaults to a **CONNECT** scan (`scan_type` option: `connect`|`syn`; SYN needs raw sockets / Npcap+admin on Windows), has an arg-injection guard on the target, and supports `ports: full`. **Every `slow` active tool that should run by default carries `expected_value=HIGH(8)`** — naabu, nmap, rustscan, **nuclei, katana, gowitness**, ffuf, extfuzz. Without it the `slow` flag makes cost HIGH(8) outweigh the default value MEDIUM(3) → score −5 < min_value(0), and the Adaptive Planner silently skips the module in default plan mode (this is what disabled port scanning, and later nuclei/katana/gowitness, until each was given the boost).
+- Port scanning (default): **rustscan** (`modules/active/rustscan.py` + pure wrapper `recon/rustscan.py`) is the default port scanner (in FULL / `paranoid`) — same `IP → OPEN_PORT` role, so the existing nmap module provides the identical `-sV` follow-up; **naabu** is the opt-in alternative (`-m naabu`). Capability `PORT_SCANNING` (active/full only). Runs RustScan in **greppable mode** (`-g`) with `--scripts none` + `--no-banner`, so it only prints ports and **never spawns nmap or any script as a side effect** of port discovery — service detection stays the separate, independently-gated nmap module. One target per invocation (`-a <ip>`, never a CIDR), so the authorized range is never expanded; the target IP and every IP in the output are scope-checked (on top of the unconditional emit-time gate). Conservative defaults (batch 1500 vs RustScan's 4500, 2000 ms timeout, top-1000 ports), all tunable via options (`ports`/`batch_size`/`timeout_ms`/`tries`/`ulimit`/`scan_order`/`exclude_ports`). Fail-soft: missing binary / bad args / timeout / non-zero exit / malformed output → empty result, scan continues; `CancelledError` propagates. `build_command`/`parse_greppable` are pure and unit-tested. The **default** FULL port scanner (naabu removed from FULL to avoid double-scanning; `-m naabu` for the alternative). Warn-and-skips without the `rustscan` binary.
+
+  **Resolved-IP scanning (`controller.controller`):** on a domain-only scope the IPs that in-scope hosts resolve to are authorized for port scanning by default (`--scan-resolved-ips`, on; active/full only, gated by `CAP_PORT_SCANNING`). `ScanController._observe_for_resolved_ip_scan` calls `ScopeEngine.authorize_ip(ip)` at the scope chokepoint, checked **only at the ALLOW step** — so **DENY still wins and the distance bound still applies** (deny-first intact). **CDN/cloud edge IPs are skipped** (`recon/cdncheck.py` — IP ranges: CloudFront incl. `2600:9000::/28`, Cloudflare, Fastly; + CNAME suffix for Akamai/Azure/…), since scanning shared provider infra is out of authorization; override with `--scan-cdn-ips`. A fully CDN-fronted target (e.g. swise.ai → CloudFront) therefore still yields an empty `ports.txt` — correctly.
 - Extra subdomain-enum techniques (all warn-and-skip without their binary, all scope-gated via `self.emit`): **zonetransfer** (dig AXFR seed → SUBDOMAIN + `dns-zone-transfer` FINDING_CANDIDATE), **tlsx** (TLS SAN → SUBDOMAIN), **hakip2host** (reverse-IP → SUBDOMAIN), **github_subdomains** (needs `GITHUB_TOKEN`), **takeover** (dangling-CNAME fingerprint, then HTTP-verifies the service's unclaimed-resource page before emitting: confirmed→HIGH, live/claimed→dropped, no-signature/unreachable→LOW unverified → `subdomain-takeover` FINDING_CANDIDATE), **puredns** (wildcard-safe massdns brute), **gotator** (permutation engine → dnsx resolve), **urlfinder**/**waymore** (passive URL enum → URL), **csprecon** (pure-Python CSP-header host extraction → SUBDOMAIN), and cloud buckets **s3scanner**/**cloud_enum** (`CLOUD` group → `cloud-bucket` FINDING_CANDIDATE; no Alibaba OSS). Shared subprocess helper: `BaseModule.run_proc()`.
 - Cloud Asset Intelligence: **cloud_intel** (`modules/web/cloudintel.py` + pure engine `recon/cloudintel.py`) is an evidence-based correlation subsystem (passive; no binary) that identifies the cloud infrastructure behind an authorized target. Watches `SUBDOMAIN`+`DNS_RECORD`+`HTTP_SERVICE`+`TECHNOLOGY`+`URL` and correlates signals from DNS/CNAME targets, HTTP `server` headers + header names (`x-amz-*`/`x-goog-*`/`x-azure-ref`/`cf-ray`…), fingerprinted technologies, and cloud URLs referenced in JS/config. Fingerprint DB (`recon/cloudintel.py`) covers **AWS** (S3, CloudFront, ELB/ALB, API Gateway, Global Accelerator), **Azure** (Blob/Storage, App Service, Front Door/CDN, Traffic Manager, API Mgmt, SQL, Key Vault), **GCP** (GCS, App Engine, Cloud Run, Functions, APIs), **Firebase** (RTDB, Hosting, Storage), and CDNs (Cloudflare/Fastly/Akamai/StackPath/BunnyCDN/KeyCDN/CDN77). `CloudCorrelator` folds independent signals per `(host, provider, service)` with a **noisy-OR confidence** (capped at 1.0), retaining evidence + provenance sources; **dedup** is per asset key. Represents assets in the knowledge graph as live `TECHNOLOGY` events (cloud stack on the host) + one `cloud-asset` `ANOMALY` per asset (≥ `min_confidence`, default 0.5) at `finish()`. **Passive identification is separate from active verification**: `options["verify"]` (default off) does a single scope-approved, **read-only benign GET** to check for a public bucket listing → `exposed-cloud-storage` FINDING_CANDIDATE; it never enumerates, writes, authenticates, or takes destructive cloud action. All emission is scope-gated via `self.emit`. In the `CLOUD` group / `--full`.
 - Censys host enrichment: **censys** (`modules/passive/censys.py` + pure parser `recon/censys.py`) enriches discovered IPs via the Censys **Platform** API free-tier **host lookup** (`GET /v3/global/asset/host/{ip}`). Watches `DNS_RECORD` (A/AAAA) + `IP`, and for each IP emits scope-gated `ANOMALY` (`host-org` — ASN/organization + service count, the "organisation IP" intel), `OPEN_PORT`/`TECHNOLOGY` (Censys-observed services), and `SUBDOMAIN` (Censys DNS names — the scope gate drops co-tenant/junk names from shared IPs and keeps only in-scope org hostnames, which re-enter the pipeline). Note: Censys **domain search** is a paid feature (free keys get 403), so this enriches known IPs rather than enumerating from a domain. Credentials via env: `CENSYS_API_KEY` (Platform PAT `censys_…`; the module warn-and-skips without it, never logs the key), optional `CENSYS_ORG_ID` (`X-Organization-ID`, paid tiers). The key's **1-concurrent-request** limit is enforced by a dedicated `asyncio.Lock` (on top of the shared RateLimiter); `max_lookups` caps quota use. In `EXTRA_PASSIVE` / `--full` / `-p fast`.
@@ -359,14 +437,17 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `policy/` | Central mode & capability policy — maps modules/actions to capabilities and enforces the selected `--mode` (osint/active/vuln/full) at module load, the network primitives, and the agent tools. ScopeEngine stays the scope gate. |
 | `vulnscan/` | Evidence-based vulnerability assessment: `schema.py` (VulnResult + status/severity), `checks.py` (Check interface + native checks + registry), `cve.py` (version→CVE correlation, uncertainty-aware), `engine.py` (per-host context + tech-aware selection + isolation), `report.py` (JSON + human report). Driven by the `vulnassess` module. |
 | `normalize/` | Output parsers |
-| `net/` | Shared HTTP transport config: `proxy.py` (ProxyConfig — Burp/explicit proxy + TLS trust + `get_proxy`), `redact.py` (centralized secret/credential redaction), `errors.py` (error taxonomy + `classify_http_error`). Applied by `BaseModule.http_client()`/`fetch()`. |
+| `net/` | Shared HTTP transport config: `proxy.py` (ProxyConfig — Burp/explicit proxy + TLS trust + `get_proxy`), `redact.py` (centralized secret/credential redaction), `errors.py` (error taxonomy + `classify_http_error`), `headers.py` (coherent browser `HeaderProfile`s + `get_headers`). Applied by `BaseModule.http_client()`/`fetch()`. |
+| `scheduler/` | Hybrid Parallel Scanning Engine (opt-in `--hybrid`): `engine.py` (`HybridScheduler` — subdomain + module-DAG concurrency), `pool.py` (`WorkerPool` — bounded, backpressured, deduped), `jobs.py` (Job/JobState), `events.py` (lifecycle event names + `build_event`), `report.py` (unified report). Orchestrates the existing engine — reuses ScopeEngine, RateLimiter, Persister. |
 | `diagnostics/` | `logger.py` — per-run structured JSONL diagnostics (`DiagnosticsLogger`): run_id + contextvar correlation_id, redacted events/errors/http streams + summary, under `results/<domain>/run-<id>/diagnostics/`. |
+| `api/` | Web GUI backend (FastAPI): `app.py` (factory + `recon-ai-web` entry), `config.py` (Settings/env), `auth.py` (bearer gate), `scans.py` (`ScanManager` — fail-closed launch/cancel, delegates to `ScanController`), `ws.py` (`LiveHub` live monitor), read-only assemblers (`overview.py`/`assets.py`/`vulns.py`/`diagnostics.py`/`sysinfo.py`), `routes/` (thin, auth-gated). Presentation/control only — no scan logic. |
+| `frontend/` | React + TS + Vite + Tailwind SPA (SOC-style console): `src/pages/` (Overview/Monitor/Scans/Assets/Vulnerabilities/Diagnostics/Settings), `src/lib/` (api/auth/live), `src/components/`. Built `dist/` served by the backend. |
 | `cli/main.py` | Typer CLI (entry: `recon-ai`) |
 | `alembic/` | DB migrations |
-| `tests/` | `security/` (scope engine) + `unit/` (878 tests, all passing) |
+| `tests/` | `security/` (scope engine) + `unit/` (incl. `test_api_*.py` for the web GUI). Full suite ~993 passing. |
 | `wordlists/` | `combined.txt` (deduped content-discovery list, ffuf default), `dns_names.txt` |
 
-Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`.
+Entry points (pyproject): `recon-ai = cli.main:app`, `recon-ai-mcp = mcpserver.server:main`, `recon-ai-web = api.app:main`. Optional extras: `ai`, `mcp`, `web`, `dev`.
 
 Repo root is clean — earlier stray duplicates (`types.py`, `engine.py`,
 `__init__.py`, `test_scope_engine.py`) that shadowed the `scope/` package and
@@ -388,6 +469,9 @@ python -m cli.main scan example.com -m crt_sh -m dnsx   # explicit modules (repl
 python -m cli.main scan example.com -r 5 -c 20      # 5 req/s per bucket, max 20 concurrent ops
 python -m cli.main scan example.com --plan-mode passive-first   # planner: passive modules only
 python -m cli.main scan example.com --full --plan-mode aggressive --budget 500   # cost-capped aggressive
+python -m cli.main scan example.com --browser-profile firefox-windows   # browser header fingerprint (off|random|…)
+python -m cli.main scan example.com --hybrid --targets-file subs.txt --workers 10   # parallel subdomain engine
+python -m cli.main scan-status <scan_id>            # per-target/per-module job status (hybrid)
 python -m cli.main modules [--profiles]             # list modules / profiles
 python -m cli.main scan example.com --ai   --db-url "sqlite+aiosqlite:///recon.db"
 python -m cli.main scan example.com --agent --db-url "sqlite+aiosqlite:///recon.db"
@@ -398,6 +482,10 @@ python -m cli.main wordlist export directories --db-url ... [--scope technology 
 python -m cli.main triage <scan_id> --db-url ...
 python -m cli.main report <domain|scan_id> --db-url ...          # vulnerability report (text)
 python -m cli.main report <domain|scan_id> --db-url ... --json -O report.json   # structured JSON
+
+# Web GUI (control/presentation layer; needs the `web` extra: pip install -e .[web])
+RECON_AI_WEB_TOKEN=secret RECON_AI_DB_URL="sqlite+aiosqlite:///recon.db" recon-ai-web   # serves API (+ built SPA) on 127.0.0.1:8787
+cd frontend && npm run dev                          # Vite dev server on localhost:5173 (proxies /api + /ws)
 ```
 `--ai`/`--agent` need `ANTHROPIC_API_KEY` + `--db-url`. Default AI model string
 in code is `claude-sonnet-4-6`. Scope defaults to `[*.domain, domain]` if
@@ -406,6 +494,51 @@ in code is `claude-sonnet-4-6`. Scope defaults to `[*.domain, domain]` if
 Every scan prints a readable end-of-scan **SCAN SUMMARY** (subdomains, ports, HTTP services, technologies, emails, findings) via `ScanController.print_summary()`; per-event logging is DEBUG-only (`-v` to see it).
 
 Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
+
+## Web GUI — SOC-style console (`api/` + `frontend/`)
+
+A dark, operator-facing web console. It is a **thin presentation + control layer
+over the existing engine** — it displays persisted recon data and launches/cancels
+scans through the real `ScanController`, and **never reimplements scanning or scope
+logic**. (Detailed design in `docs/gui-architecture.md`.)
+
+- **Backend** (`api/`, a FastAPI app; sibling of `mcpserver/`). `api/app.py::create_app`
+  wires settings + the `ScanManager` + strict CORS + auth-gated routers, and serves
+  the built SPA (`frontend/dist`) as static files when present (mounted last so
+  `/api/*` wins). Entry point `recon-ai-web` (`api.app:main`) runs uvicorn.
+  - **Single security gate.** One bearer token (`RECON_AI_WEB_TOKEN`; a random one
+    is generated and printed **once** to stderr if unset, never exposed by any
+    endpoint) protects **every** sensitive route **and** the WebSocket. Bind is
+    **loopback by default** (`RECON_AI_WEB_HOST`/`_PORT`, 127.0.0.1:8787); CORS is a
+    **strict allow-list, never `*`** (`RECON_AI_WEB_CORS`, defaults to the Vite dev
+    origin). All responses are redacted.
+  - **Routes delegate, never scan.** `api/scans.py::ScanManager.launch` does
+    **backend-authoritative, fail-closed scope re-validation** before any task is
+    created (out-of-scope → 400, no task), builds the controller via an injectable
+    `controller_factory`, attaches the live monitor **before** running, and runs it
+    as a background task; cancel cancels the task. Route handlers validate +
+    persist/delegate only — no scan logic in them.
+  - **Read-only assemblers** (`overview.py`/`assets.py`/`vulns.py`/`diagnostics.py`/
+    `sysinfo.py`) read **through the existing repositories** (no DB schema change)
+    and **degrade gracefully** (empty payload) with no DB. `/api/config`
+    (`sysinfo.build_config`) exposes **non-sensitive** config only — never the token
+    or DB URL (DB shown as dialect only). Diagnostics reads are **path-confined**
+    (glob-only discovery; `../..` traversal proven blocked in tests).
+  - **Live updates** (`api/ws.py::LiveHub`): taps the `EventBus` (all event types)
+    plus a 1 Hz sampler of `rate_limiter.stats()` + `controller.live_pool_stats`
+    into a seq'd ring buffer; a reconnecting client `replay(since, scan_id)`s only
+    the missed tail. A slow/disconnected client is dropped (bounded queue) and
+    **never affects the running scan**; WS disconnection never interrupts execution.
+- **Frontend** (`frontend/`): React 18 + TypeScript + Vite + Tailwind + TanStack
+  Query + React Router SPA. Pages: **Overview**, **Live Monitor**, **Scans**,
+  **Asset Explorer**, **Vulnerability Intelligence**, **Diagnostics**, **Settings**.
+  Token lives in this-browser `localStorage` (client-side management in Settings);
+  `lib/api.ts` typed fetch client (bearer injection), `lib/live.ts` live-socket.
+  Dev: `cd frontend && npm run dev` (Vite on `localhost:5173`, proxies `/api`+`/ws`
+  to the backend); prod: `npm run build` → backend serves `dist`.
+- **Run:** `set RECON_AI_WEB_TOKEN=… && set RECON_AI_DB_URL=… && recon-ai-web`
+  (or `python -m api.app`). Needs the `web` extra (`pip install -e .[web]`:
+  fastapi/uvicorn/websockets). POST `/api/scans` returns **201**.
 
 ## Windows toolchain gotchas (this machine)
 
@@ -416,23 +549,29 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
   the prebuilt release, now in go/bin and functional.
 - `naabu` uses a **CONNECT** scan by default (works without raw sockets); only the
   `syn` `scan_type` needs Npcap + admin on Windows.
-- `rustscan` **installed & verified** (v2.4.1 via `cargo install rustscan`; needs Rust >=1.85 / edition-2024 — the toolchain here was updated 1.78 -> 1.99.1). Opt-in alternative port scanner (`-m rustscan`); the wrapper runs it greppable (`-g`) with `--scripts none` + `--no-banner` and parses `ip -> [ports]`. Default per-port timeout 3000ms (a shorter one silently drops slow open ports under `--top`). Warn-and-skips if absent — naabu stays the default.
+- `rustscan` **installed & verified** (v2.4.1 via `cargo install rustscan`; needs Rust >=1.85 / edition-2024 — the toolchain here was updated 1.78 -> 1.99.1). The **default** port scanner (`-m naabu` for the alternative); the wrapper runs it greppable (`-g`) with `--scripts none` + `--no-banner` and parses `ip -> [ports]`. Default per-port timeout 3000ms (a shorter one silently drops slow open ports under `--top`). Warn-and-skips if absent — naabu is the fallback.
 - Port scanning is gated to `active`/`full` modes (capability `PORT_SCANNING`); it never runs in `osint`/`vuln`.
-- Built & working (verified present on this machine, 2026-10-24):
+- Built & working (verified present on this machine, 2026-11-06):
   - **go/bin:** subfinder, dnsx, httpx(PD), naabu, katana, ffuf, nuclei, trufflehog
     (v3.97.9 prebuilt, checksum-verified), gau, gowitness, amass, assetfinder,
-    github-subdomains, gotator, hakip2host, puredns, s3scanner, tlsx, urlfinder.
+    github-subdomains, gotator, hakip2host, puredns, s3scanner, tlsx, urlfinder,
+    findomain (v10.0.1 prebuilt release — `cargo install` is dead, the crate was
+    yanked), jsluice (built from source with the **64-bit** gcc at
+    `C:\msys64\mingw64\bin` — put mingw64 ahead of mingw32 on PATH, else the
+    32-bit `cc1.exe` fails CGO; the result is statically linked, no runtime DLLs).
   - **elsewhere:** nmap (`Program Files (x86)\Nmap`), rustscan (`~/.cargo/bin`,
     v2.4.1), waymore (`~/AppData/Roaming/Python/Python313/Scripts`, pip),
     retire.js (`~/AppData/Roaming/npm/retire.CMD`, v6.1.0 via `npm i -g retire`),
     exiftool.
+  - **puredns** now ships a bundled trusted-resolver list (`wordlists/resolvers.txt`)
+    and defaults to it — no more "no resolvers file" warn-and-skip.
   - **ffuf is the sole content-discovery fuzzer** (the native dirsearch fallback
     was removed), so the `ffuf` binary is **required** for content discovery.
-- Still **missing** (those modules warn-and-skip): `whatweb` (fingerprint uses
-  httpx/Wappalyzer + heuristics instead), `findomain`, `cloud_enum` (s3scanner
-  covers AWS buckets), `dig` (so the `zonetransfer` AXFR check is skipped),
-  `jsluice` (AST JS miner — `go install github.com/BishopFox/jsluice/cmd/jsluice@latest`;
-  the regex miners linkfinder/js_intel/apifinder still run without it).
+- Still **missing** (those modules warn-and-skip, all low-impact / covered):
+  `whatweb` (needs Ruby; fingerprint uses httpx/Wappalyzer + heuristics instead),
+  `cloud_enum` (not on PyPI; s3scanner + cloud_intel cover buckets), `dig` (needs
+  an elevated install; the `zonetransfer` AXFR check is skipped). Credentials
+  unset: `GITHUB_TOKEN` (github-subdomains), `CENSYS_API_KEY` (censys).
 - **exiftool** (v13.59, `OliverBetz.ExifTool` via winget) is installed at
   `C:\Users\samee\AppData\Local\Programs\ExifTool\exiftool.EXE` and on the User
   PATH. The **metascan** module auto-prefers it (`shutil.which("exiftool")` →
@@ -440,11 +579,20 @@ Tests: `pytest` (config in pyproject; `asyncio_mode=auto`).
   extractor (`recon/metadata.py`). A shell started before the install has a stale
   PATH — prepend `export PATH="/c/Users/samee/AppData/Local/Programs/ExifTool:$PATH"`
   (like the go/bin note) for scans launched from it; new terminals pick it up.
-- **Scope note:** resolved IPs are OUT under a domain-only scope (deny-first).
-  Add `--in-scope <ip/CIDR>` to let httpx_probe/naabu touch a host.
+- **Scope note:** a resolved IP is still OUT by default for most purposes
+  (deny-first), but **port scanning** now auto-authorizes the IPs that in-scope
+  hosts resolve to (`--scan-resolved-ips`, on by default, active/full only) via
+  `ScopeEngine.authorize_ip` — **CDN/cloud edge IPs excepted** (`recon/cdncheck.py`;
+  override `--scan-cdn-ips`). DENY and the distance bound still win. To scan an
+  arbitrary IP for everything (not just via resolution), add `--in-scope <ip/CIDR>`.
 
 ## Status
 
 All 5 phases complete (scope engine → events/DB/recon → AI triage → agent loop →
-module system + MCP). 878 tests passing. See persistent memory
-`project-recon-ai` and `reference-toolchain-env` for the fuller record.
+module system + MCP), plus later subsystems: the Adaptive Planner, shared body
+cache, evidence-based vulnerability assessment (`vulnscan/`), central mode/
+capability policy, outbound proxy + structured diagnostics, coherent browser
+header profiles, the **Hybrid Parallel Scanning Engine** (`scheduler/`, `--hybrid`),
+and the **SOC-style web GUI** (`api/` + `frontend/`). Full suite ~993 tests
+passing. See persistent memory `project-recon-ai` and `reference-toolchain-env`
+for the fuller record.
