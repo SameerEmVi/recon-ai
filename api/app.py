@@ -26,6 +26,38 @@ log = logging.getLogger("api")
 _VERSION = "0.1.0"
 
 
+class _SPAStaticFiles:
+    """StaticFiles that falls back to index.html for unmatched paths.
+
+    The frontend is a single-page app with client-side routing, so a hard
+    refresh (or a bookmarked deep link) on a route like /skills must return the
+    app shell rather than 404 — the browser then lets React Router render the
+    page. Real asset requests (/assets/*.js, favicon, …) are served normally;
+    only paths with no matching file fall through to index.html.
+
+    Implemented as a lazy factory so fastapi.staticfiles is imported only when a
+    built frontend is actually present.
+    """
+
+    @staticmethod
+    def build(directory: str):
+        from fastapi.staticfiles import StaticFiles
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        class SPAStaticFiles(StaticFiles):
+            async def get_response(self, path: str, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except StarletteHTTPException as exc:
+                    if exc.status_code == 404:
+                        # Unknown path → serve the SPA shell so the client router
+                        # can handle it (deep-link refresh fix).
+                        return await super().get_response("index.html", scope)
+                    raise
+
+        return SPAStaticFiles(directory=directory, html=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     yield
@@ -74,8 +106,9 @@ def create_app(settings: Settings | None = None,
     import os
     dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
     if os.path.isdir(dist):
-        from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+        # SPA-aware: unknown non-API paths fall back to index.html so a hard
+        # refresh on a client route (e.g. /skills) renders the app, not a 404.
+        app.mount("/", _SPAStaticFiles.build(dist), name="frontend")
 
     return app
 
