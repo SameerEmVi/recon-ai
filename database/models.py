@@ -115,6 +115,26 @@ class Finding(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class FindingTriage(SQLModel, table=True):
+    """Operator triage state layered on top of a deterministic `Finding`.
+
+    Kept in its own table so the recon-produced finding stays immutable — this is
+    the human/bug-bounty workflow axis (report stage + note), one row per finding.
+    `report_stage` tracks the submission lifecycle; `verification_override` lets an
+    operator confirm/downgrade a finding's status without the engine ever promoting
+    it (the deterministic-vs-human split, mirroring deterministic-vs-LLM).
+    """
+
+    __tablename__ = "finding_triage"
+
+    finding_id: uuid.UUID = Field(foreign_key="findings.id", primary_key=True)
+    # pending | submitted | accepted | rejected | duplicate | informative | triaged
+    report_stage: str = Field(default="pending", index=True)
+    verification_override: Optional[str] = Field(default=None)   # operator-set status
+    note: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 # ── VocabularyItem (persistent reconnaissance learning system) ──────────────────
 
 class VocabularyItem(SQLModel, table=True):

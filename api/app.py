@@ -52,8 +52,8 @@ def create_app(settings: Settings | None = None,
     )
 
     from api.routes import (
-        assets, catalog, config, diagnostics, graph, health, overview, plan,
-        scans, vulns,
+        assets, catalog, config, diagnostics, execmap, findings, graph, health,
+        overview, plan, scans, skills, traffic, vulns,
     )
     app.include_router(health.router)
     app.include_router(scans.router)
@@ -63,7 +63,11 @@ def create_app(settings: Settings | None = None,
     app.include_router(graph.router)
     app.include_router(plan.router)
     app.include_router(vulns.router)
+    app.include_router(findings.router)
     app.include_router(diagnostics.router)
+    app.include_router(traffic.router)
+    app.include_router(skills.router)
+    app.include_router(execmap.router)
     app.include_router(config.router)
 
     # Serve the built frontend if present (added AFTER API routers so /api/* wins).

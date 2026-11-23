@@ -25,7 +25,8 @@ const KIND_ORDER: GraphKind[] = [
   "domain", "host", "ip", "service", "port", "tech", "url", "finding", "anomaly", "email",
 ];
 
-const MAX_ELEMENTS = 3500; // browser-side safety cap
+const MAX_ELEMENTS = 6000; // browser-side safety cap (fits the backend's 2500-node graph + edges)
+const COSE_MAX_NODES = 500; // above this, cose is too slow — use a fast deterministic layout
 
 function nodeEl(n: GraphNode): ElementDefinition {
   return { group: "nodes", data: { ...n } };
@@ -139,50 +140,88 @@ export default function Map() {
     layoutTimer.current = setTimeout(() => {
       const cy = cyRef.current;
       if (!cy) return;
-      cy.layout({
-        name: "cose",
-        animate: initial,
-        animationDuration: 400,
-        nodeRepulsion: () => 8000,
-        idealEdgeLength: () => 60,
-        fit: initial,
-        randomize: false,
-      } as cytoscape.LayoutOptions).run();
-      setCounts(() => {
-        const by: Record<string, number> = {};
-        cy.nodes().forEach((n) => {
-          const k = n.data("kind") as string;
-          by[k] = (by[k] ?? 0) + 1;
-        });
-        return by;
-      });
+      // The container may have been zero-sized when the instance was created
+      // (e.g. first paint); resize picks up the real box before we lay out.
+      cy.resize();
+      const n = cy.nodes().length;
+      // cose (force-directed) is only viable for small graphs; a large one would
+      // stall the main thread, so it gets a fast deterministic layout instead.
+      const opts =
+        n > COSE_MAX_NODES
+          ? {
+              name: "concentric",
+              animate: false,
+              fit: true,
+              concentric: (node: cytoscape.NodeSingular) => node.degree(false),
+              levelWidth: () => 6,
+              minNodeSpacing: 8,
+            }
+          : {
+              name: "cose",
+              animate: initial,
+              animationDuration: 400,
+              nodeRepulsion: () => 8000,
+              idealEdgeLength: () => 60,
+              fit: initial,
+              randomize: false,
+            };
+      try {
+        cy.layout(opts as unknown as cytoscape.LayoutOptions).run();
+      } catch {
+        // A layout engine failure must never leave the canvas blank — fall back
+        // to the trivial grid, which always renders.
+        try {
+          cy.layout({ name: "grid", fit: true } as cytoscape.LayoutOptions).run();
+        } catch {
+          /* ignore */
+        }
+      }
+      recount();
     }, initial ? 0 : 350);
   };
 
+  // Recompute the per-kind node counts directly from the graph — independent of
+  // the layout, so the count shows even when a big layout is slow or fails.
+  const recount = () => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    const by: Record<string, number> = {};
+    cy.nodes().forEach((n) => {
+      const k = n.data("kind") as string;
+      by[k] = (by[k] ?? 0) + 1;
+    });
+    setCounts(by);
+  };
+
   // Add nodes (first) then edges, deduping by id against what's already in cy.
+  // The element cap is enforced WHILE adding (a large REST snapshot can exceed it
+  // on its own), so the canvas is always bounded regardless of payload size.
   const addElements = (nodes: GraphNode[], edges: GraphEdge[]): boolean => {
     const cy = cyRef.current;
     if (!cy) return false;
-    if (cy.elements().length >= MAX_ELEMENTS) {
-      setTruncated(true);
-      return false;
-    }
     let added = false;
+    let capped = false;
+    let count = cy.elements().length;
     cy.batch(() => {
       for (const n of nodes) {
+        if (count >= MAX_ELEMENTS) { capped = true; break; }
         if (cy.getElementById(n.id).empty()) {
           cy.add(nodeEl(n));
+          count++;
           added = true;
         }
       }
       for (const e of edges) {
+        if (count >= MAX_ELEMENTS) { capped = true; break; }
         if (!cy.getElementById(e.id).empty()) continue;
         // only link nodes that exist (endpoints always ship with their edge)
         if (cy.getElementById(e.source).empty() || cy.getElementById(e.target).empty()) continue;
         cy.add(edgeEl(e));
+        count++;
         added = true;
       }
     });
+    if (capped) setTruncated(true);
     return added;
   };
 
@@ -194,6 +233,7 @@ export default function Map() {
     processedSeq.current = 0;
     setTruncated(graph.truncated);
     addElements(graph.nodes, graph.edges);
+    recount();              // show the count immediately, before the layout settles
     scheduleLayout(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, scanId]);
@@ -213,7 +253,10 @@ export default function Map() {
       const edges = f.graph.edges as unknown as GraphEdge[];
       if (addElements(nodes, edges)) added = true;
     }
-    if (added) scheduleLayout(false);
+    if (added) {
+      recount();            // keep the count live even if the layout is debounced
+      scheduleLayout(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.lastSeq]);
 
@@ -231,7 +274,12 @@ export default function Map() {
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className={cn("h-2 w-2 rounded-full", connected ? "bg-success" : "bg-critical")} />
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full transition-colors",
+                connected ? "bg-success text-success pulse-ring" : "bg-critical"
+              )}
+            />
             {connected ? "streaming" : "disconnected"}
           </div>
           <Select value={scanId} onChange={(e) => setScanId(e.target.value)} className="w-64">
@@ -245,17 +293,32 @@ export default function Map() {
         </div>
       </div>
 
-      {!scanId ? (
-        <p className="text-sm text-muted-foreground">Select a scan to map.</p>
-      ) : (
-        <div className="relative">
+      {/* The canvas is ALWAYS mounted (even before a scan is picked) so the
+          one-time Cytoscape init in the effect above always finds its container;
+          hiding it behind a conditional left the ref null at mount and the map
+          never rendered. Empty states are overlays on top of the live canvas. */}
+      <div className="relative">
           <div
             ref={containerRef}
             className="h-[72vh] w-full rounded-lg border border-border bg-panel"
           />
 
+          {/* Empty-state overlays */}
+          {!scanId ? (
+            <div className="absolute inset-0 flex animate-fade-in items-center justify-center">
+              <p className="text-sm text-muted-foreground">Select a scan to map.</p>
+            </div>
+          ) : total === 0 ? (
+            <div className="absolute inset-0 flex animate-fade-in items-center justify-center">
+              <p className="text-sm text-muted-foreground">
+                {graph ? "No mappable assets yet." : "Loading graph…"}
+              </p>
+            </div>
+          ) : null}
+
           {/* Legend */}
-          <div className="absolute left-3 top-3 flex flex-col gap-1 rounded-md border border-border bg-background/80 p-2 text-[11px] backdrop-blur">
+          {total > 0 && (
+          <div className="absolute left-3 top-3 flex animate-fade-in flex-col gap-1 rounded-md border border-border bg-background/80 p-2 text-[11px] backdrop-blur">
             {KIND_ORDER.filter((k) => counts[k]).map((k) => (
               <div key={k} className="flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: KIND_COLOR[k] }} />
@@ -263,12 +326,12 @@ export default function Map() {
                 <span className="ml-auto tabular-nums text-foreground">{counts[k]}</span>
               </div>
             ))}
-            {total === 0 && <span className="text-muted-foreground">waiting for data…</span>}
           </div>
+          )}
 
           {/* Selected node */}
           {selected && (
-            <div className="absolute right-3 top-3 w-72 rounded-md border border-border bg-background/90 p-3 text-xs backdrop-blur">
+            <div className="absolute right-3 top-3 w-72 animate-scale-in rounded-md border border-border bg-background/90 p-3 text-xs backdrop-blur">
               <div className="mb-1 flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: KIND_COLOR[selected.kind] }} />
                 <span className="font-mono text-foreground">{selected.kind}</span>
@@ -288,7 +351,6 @@ export default function Map() {
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }

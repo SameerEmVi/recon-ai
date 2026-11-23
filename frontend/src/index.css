@@ -46,5 +46,93 @@ body {
 
 /* Compact, data-dense scrollbars that match the theme. */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: hsl(var(--muted)); border-radius: 6px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted)); border-radius: 6px; transition: background 0.2s; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Motion layer — professional "SOC console" micro-interactions.
+   Everything here is CSS-only (no JS animation dep) and is fully disabled
+   under prefers-reduced-motion for accessibility.
+   ────────────────────────────────────────────────────────────────────────── */
+::selection { background: hsl(var(--primary) / 0.28); color: hsl(var(--foreground)); }
+
+@layer utilities {
+  /* Entrance animations */
+  .animate-fade-in { animation: fade-in 0.28s ease-out both; }
+  .animate-fade-up { animation: fade-up 0.34s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-scale-in { animation: scale-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-slide-in-right { animation: slide-in-right 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+  /* Staggered children: each direct child enters a beat after the previous.
+     Keeps lists/grids from popping in all at once. */
+  .stagger > * { animation: fade-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .stagger > *:nth-child(1) { animation-delay: 0.02s; }
+  .stagger > *:nth-child(2) { animation-delay: 0.06s; }
+  .stagger > *:nth-child(3) { animation-delay: 0.10s; }
+  .stagger > *:nth-child(4) { animation-delay: 0.14s; }
+  .stagger > *:nth-child(5) { animation-delay: 0.18s; }
+  .stagger > *:nth-child(6) { animation-delay: 0.22s; }
+  .stagger > *:nth-child(7) { animation-delay: 0.26s; }
+  .stagger > *:nth-child(8) { animation-delay: 0.30s; }
+
+  /* Hover-elevate for cards / interactive tiles */
+  .hover-lift {
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    will-change: transform;
+  }
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    border-color: hsl(var(--primary) / 0.45);
+    box-shadow: 0 8px 24px -12px hsl(222 40% 2% / 0.8), 0 0 0 1px hsl(var(--primary) / 0.12);
+  }
+
+  /* Skeleton shimmer for loading states */
+  .skeleton {
+    position: relative;
+    overflow: hidden;
+    background: hsl(var(--muted) / 0.6);
+    border-radius: calc(var(--radius) - 2px);
+  }
+  .skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, hsl(var(--muted-foreground) / 0.12), transparent);
+    animation: shimmer 1.4s infinite;
+  }
+
+  /* Live pulse ring (health dot / running badges) */
+  .pulse-ring { position: relative; }
+  .pulse-ring::before {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.55;
+    animation: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes scale-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes slide-in-right { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.5; }
+  70% { transform: scale(2.2); opacity: 0; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* Respect the user's OS-level reduced-motion preference: kill all of it. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

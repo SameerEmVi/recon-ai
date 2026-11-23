@@ -280,3 +280,235 @@ export const getDiagnostics = (params: { domain?: string; run_id?: string; strea
 export const checkProxy = (url: string) =>
   apiFetch<ProxyCheck>("/api/diagnostics/proxy-check", { method: "POST", body: JSON.stringify({ url }) });
 export const getConfig = () => apiFetch<AppConfig>("/api/config");
+
+// ── Traffic (proxy-style HTTP exchange viewer, backed by http.jsonl) ──────────
+export interface TrafficFlow {
+  time: string | null;
+  module: string | null;
+  operation: string | null;
+  host: string;
+  method: string;
+  url: string;
+  path: string;
+  status: number | null;
+  size: number | null;
+  duration_ms: number | null;
+  tls_verify: boolean | null;
+  ok: boolean;
+  error_type: string | null;
+  error_message: string | null;
+}
+export interface TrafficRun {
+  domain: string;
+  run_id: string;
+  modified: number;
+}
+export interface Traffic {
+  run: TrafficRun | null;
+  flows: TrafficFlow[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+  facets: { methods: string[]; statuses: number[]; modules: string[] };
+  available_runs: TrafficRun[];
+}
+export interface TrafficParams {
+  scan_id?: string;
+  run_id?: string;
+  host?: string;
+  method?: string;
+  status?: string;
+  q?: string;
+  module?: string;
+  errors_only?: boolean;
+  size_min?: number;
+  size_max?: number;
+  page?: number;
+  page_size?: number;
+}
+export const getTraffic = (params: TrafficParams = {}) => {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "" || v === false) continue;
+    qs.set(k, String(v));
+  }
+  const q = qs.toString();
+  return apiFetch<Traffic>("/api/traffic" + (q ? `?${q}` : ""));
+};
+
+// ── Findings (cross-task vulnerability overview + operator triage) ────────────
+export interface FindingTask {
+  scan_id: string;
+  domain: string;
+  mode?: string | null;
+}
+export interface Finding {
+  id: string;
+  host: string;
+  title: string;
+  description: string;
+  category: string;
+  severity: string;
+  detected_status: string | null;
+  status: string | null;
+  verification_override: string | null;
+  report_stage: string;
+  note: string | null;
+  confidence: number | null;
+  confidence_label: string | null;
+  detection_method: string | null;
+  tier: string | null;
+  references?: unknown;
+  remediation: string | null;
+  url: string | null;
+  check_id: string | null;
+  task: FindingTask;
+  created_at: string | null;
+  triaged_at: string | null;
+}
+export interface Findings {
+  findings: Finding[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+  summary: {
+    total: number;
+    by_severity: Record<string, number>;
+    by_stage: Record<string, number>;
+    by_status: Record<string, number>;
+  };
+  facets: { categories: string[]; statuses: string[]; stages: string[]; tasks: FindingTask[] };
+}
+export interface FindingsParams {
+  scan_id?: string;
+  severity?: string;
+  report_stage?: string;
+  status?: string;
+  category?: string;
+  host?: string;
+  q?: string;
+  sort?: string;
+  page?: number;
+  page_size?: number;
+}
+function findingsQuery(params: FindingsParams): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "") continue;
+    qs.set(k, String(v));
+  }
+  const q = qs.toString();
+  return q ? `?${q}` : "";
+}
+export const getFindings = (params: FindingsParams = {}) =>
+  apiFetch<Findings>("/api/findings" + findingsQuery(params));
+export const patchTriage = (
+  id: string,
+  body: { report_stage?: string; note?: string; verification_override?: string }
+) => apiFetch<{ ok: boolean; error?: string }>(`/api/findings/${id}/triage`, {
+  method: "PATCH",
+  body: JSON.stringify(body),
+});
+export async function exportFindings(params: FindingsParams = {}): Promise<void> {
+  const token = getToken();
+  const res = await fetch("/api/findings/export" + findingsQuery(params), {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new ApiError(res.status, "export failed");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "findings.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Skills (agent-skill library, SKILL.md) ───────────────────────────────────
+export interface SkillStats {
+  total_calls: number;
+  tasks_covered: number;
+  last_called: string | null;
+}
+export interface SkillSummary {
+  name: string;
+  description: string;
+  path: string;
+  version: string | null;
+  roles: string[];
+  allowed_tools: string[];
+  linked_mcp: string[];
+  capabilities: string[];
+  triggers: string[];
+  tags: string[];
+  resources: string[];
+  summary: string;
+  updated_at: number;
+  error: string | null;
+  stats: SkillStats;
+}
+export interface SkillDetail extends SkillSummary {
+  body: string;
+  roles_all: string[];
+}
+export interface SkillList {
+  root: string;
+  count: number;
+  roles: string[];
+  skills: SkillSummary[];
+}
+export interface SkillCreateBody {
+  name: string;
+  description?: string;
+  body?: string;
+  roles?: string[];
+  allowed_tools?: string[];
+  linked_mcp?: string[];
+  capabilities?: string[];
+  tags?: string[];
+  overwrite?: boolean;
+}
+export const getSkills = () => apiFetch<SkillList>("/api/skills");
+export const getSkill = (name: string) =>
+  apiFetch<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
+export const createSkill = (body: SkillCreateBody) =>
+  apiFetch<{ ok: boolean; name?: string }>("/api/skills", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const patchSkill = (
+  name: string,
+  body: { roles?: string[]; description?: string; tags?: string[]; capabilities?: string[] }
+) => apiFetch<{ ok: boolean; roles?: string[] }>(`/api/skills/${encodeURIComponent(name)}`, {
+  method: "PATCH",
+  body: JSON.stringify(body),
+});
+
+// ── Tool-execution mindmap ────────────────────────────────────────────────────
+export type ExecKind = "scan" | "tool" | "etype";
+export interface ExecNode {
+  id: string;
+  kind: ExecKind;
+  label: string;
+  count?: number;
+  hosts?: number;
+  state?: string | null;
+  etype?: string;
+  tools?: number;
+  events?: number;
+}
+export interface ExecEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+export interface ExecMap {
+  scan: { scan_id: string; domain: string; status: string; mode: string } | null;
+  nodes: ExecNode[];
+  edges: ExecEdge[];
+  summary: { tools: number; events: number; event_types: number; by_tool: Record<string, number> };
+}
+export const getExecMap = (scanId?: string) =>
+  apiFetch<ExecMap>("/api/execmap" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));

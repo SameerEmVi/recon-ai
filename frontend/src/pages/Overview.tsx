@@ -7,6 +7,7 @@ import { getOverview } from "@/lib/api";
 import { StatTile } from "@/components/StatTile";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton, SkeletonTiles } from "@/components/ui/skeleton";
 
 // Severity → color (matches the SOC palette).
 const SEV_COLOR: Record<string, string> = {
@@ -32,9 +33,23 @@ export default function Overview() {
     refetchInterval: 8_000,
   });
 
-  if (isLoading) return <p className="text-sm text-muted-foreground">Loading overview…</p>;
+  if (isLoading)
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-6 w-32" />
+        <SkeletonTiles count={6} />
+        <div className="stagger grid gap-4 lg:grid-cols-2">
+          <Skeleton className="h-56 w-full" />
+          <Skeleton className="h-56 w-full" />
+        </div>
+      </div>
+    );
   if (isError || !data)
-    return <p className="text-sm text-critical">Could not load overview (is the backend reachable?).</p>;
+    return (
+      <p className="animate-fade-in text-sm text-critical">
+        Could not load overview (is the backend reachable?).
+      </p>
+    );
 
   const sevData = SEV_ORDER.filter((s) => data.severity[s]).map((s) => ({
     name: s,
@@ -54,7 +69,7 @@ export default function Overview() {
       </div>
 
       {/* KPI row */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="stagger grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <StatTile label="Active scans" value={data.scans.running} icon={<Activity className="h-4 w-4" />}
           accent={data.scans.running ? "success" : undefined} />
         <StatTile label="Completed" value={data.scans.complete} />
@@ -65,9 +80,9 @@ export default function Overview() {
           accent={data.assets.findings ? "warning" : undefined} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="stagger grid gap-4 lg:grid-cols-2">
         {/* Severity distribution */}
-        <Card>
+        <Card className="hover-lift">
           <CardHeader><CardTitle>Vulnerability severity</CardTitle></CardHeader>
           <CardContent>
             {sevData.length === 0 ? (
@@ -91,7 +106,7 @@ export default function Overview() {
         </Card>
 
         {/* Technology distribution */}
-        <Card>
+        <Card className="hover-lift">
           <CardHeader><CardTitle>Technology distribution</CardTitle></CardHeader>
           <CardContent>
             {techData.length === 0 ? (
@@ -111,9 +126,9 @@ export default function Overview() {
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="stagger grid gap-4 lg:grid-cols-2">
         {/* Recent events */}
-        <Card>
+        <Card className="hover-lift">
           <CardHeader><CardTitle>Recent events</CardTitle></CardHeader>
           <CardContent className="max-h-72 space-y-1.5 overflow-auto">
             {data.recent_events.length === 0 ? (
@@ -131,7 +146,7 @@ export default function Overview() {
         </Card>
 
         {/* Recent scans + worker/job utilisation */}
-        <Card>
+        <Card className="hover-lift">
           <CardHeader><CardTitle>Recent scans</CardTitle></CardHeader>
           <CardContent className="space-y-2">
             {data.recent_scans.length === 0 ? (

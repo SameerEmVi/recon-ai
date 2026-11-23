@@ -41,6 +41,8 @@ class Settings:
     )
     #: Where results/diagnostics live (confines export/file reads).
     results_dir: str = field(default_factory=lambda: os.environ.get("RECON_AI_RESULTS_DIR", "results"))
+    #: Agent-skill library root (SKILL.md folders). Git-friendly, portable.
+    skills_dir: str = field(default_factory=lambda: os.environ.get("RECON_AI_SKILLS_DIR", "skills"))
 
     @classmethod
     def load(cls) -> "Settings":

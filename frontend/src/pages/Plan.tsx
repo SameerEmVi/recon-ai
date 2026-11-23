@@ -163,7 +163,12 @@ export default function Plan() {
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className={cn("h-2 w-2 rounded-full", connected ? "bg-success" : "bg-critical")} />
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full transition-colors",
+                connected ? "bg-success text-success pulse-ring" : "bg-critical"
+              )}
+            />
             {connected ? "streaming" : "disconnected"}
           </div>
           <select
@@ -193,9 +198,9 @@ export default function Plan() {
       )}
 
       {!scanId ? (
-        <p className="text-sm text-muted-foreground">Select a scan to view its plan.</p>
+        <p className="animate-fade-in text-sm text-muted-foreground">Select a scan to view its plan.</p>
       ) : !isHybrid && targets.length === 0 ? (
-        <Card>
+        <Card className="animate-fade-in">
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
             No per-module execution plan recorded for this scan yet.
             <br />
@@ -205,9 +210,9 @@ export default function Plan() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div className="stagger grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {targets.map((t) => (
-            <Card key={t.target}>
+            <Card key={t.target} className="hover-lift">
               <CardHeader className="flex-row items-center justify-between gap-2 space-y-0 pb-2">
                 <CardTitle className="truncate font-mono text-sm" title={t.target}>
                   {t.target}

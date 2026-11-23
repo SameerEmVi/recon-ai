@@ -5,6 +5,31 @@ Status legend: 🔴 OPEN · 🟡 IN PROGRESS · 🟢 FIXED (uncommitted) · ✅ 
 
 ---
 
+## BUG-004 — Asset Map blank for the selected scan (Cytoscape never initialised)
+
+- **Status:** 🟢 FIXED (uncommitted)
+- **Severity:** Medium (feature unusable — the whole Map view rendered nothing)
+- **Found:** 2026-11-22, Oceania (2500-node) + follow-up: Map showed "0 nodes /
+  waiting for data…" even though `/api/graph` returned 2500 nodes / 2688 edges.
+- **Area:** `frontend/src/pages/Map.tsx`
+- **Symptom:** The canvas stayed empty regardless of scan size. An earlier patch
+  (element cap + fast concentric layout for big graphs) was necessary but not the
+  cause — small graphs were *also* only intermittently rendering.
+- **Root cause (the real one):** the Cytoscape instance is created in a
+  `useEffect([])` that runs **once at mount**. But the container `<div ref=…>` lived
+  inside `{!scanId ? <message> : <container>}`, and at mount `scanId` is `""` — so
+  the container was **not in the DOM**, `containerRef.current` was `null`, the init
+  bailed, and the empty-deps effect never re-ran when a scan was later selected.
+  Result: `cyRef.current` stayed `null` forever and every graph-load effect
+  short-circuited on `if (!cy) return`. Small graphs only "worked" when a remount
+  (HMR / nav away-and-back) happened to re-run init after a scan was already set.
+- **Fix:** the canvas `<div>` is now **always mounted** (empty states are overlays
+  on top of it), so the one-time init always finds its container. Added a
+  `cy.resize()` before each layout as defence against a zero-sized box at first
+  paint.
+- **Verification:** rebuilt SPA; `/api/graph` unchanged (data was never the
+  problem). Frontend typecheck + production build clean.
+
 ## BUG-001 — Hybrid scan path never backfilled `target_domain` to the DB
 
 - **Status:** ✅ FIXED & COMMITTED (`61fcc22`, `feature/recon-intelligence-subsystems`)
