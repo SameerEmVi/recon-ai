@@ -3,6 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { listScans, getPlan } from "@/lib/api";
 import { useLiveSocket } from "@/lib/live";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select } from "@/components/ui/field";
+import { StatusIndicator } from "@/components/common/StatusIndicator";
+import { EmptyState } from "@/components/common/states";
+import { ListChecks } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 // Job state → chip style, using the theme's semantic colors.
@@ -155,34 +159,20 @@ export default function Plan() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight">Plan &amp; Progress</h1>
+          <h1 className="text-lg font-semibold tracking-tight">Agent Plans</h1>
           <p className="text-xs text-muted-foreground">
-            Recon plan as it executes — {targets.length} target(s)
+            Per-target execution plan as it runs — {targets.length} target(s)
             {plan?.scan ? ` · ${plan.scan.domain}` : ""}
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span
-              className={cn(
-                "h-2 w-2 rounded-full transition-colors",
-                connected ? "bg-success text-success pulse-ring" : "bg-critical"
-              )}
-            />
-            {connected ? "streaming" : "disconnected"}
-          </div>
-          <select
-            value={scanId}
-            onChange={(e) => setScanId(e.target.value)}
-            className="h-9 w-64 rounded-md border border-border bg-background px-2 text-sm"
-          >
+          <StatusIndicator tone={connected ? "success" : "critical"} pulse={connected} label={connected ? "streaming" : "disconnected"} />
+          <Select value={scanId} onChange={(e) => setScanId(e.target.value)} className="w-56">
             <option value="">Select a scan…</option>
             {(scans ?? []).map((s) => (
-              <option key={s.scan_id} value={s.scan_id}>
-                {s.domain} · {s.status}
-              </option>
+              <option key={s.scan_id} value={s.scan_id}>{s.domain} · {s.status}</option>
             ))}
-          </select>
+          </Select>
         </div>
       </div>
 
@@ -198,17 +188,10 @@ export default function Plan() {
       )}
 
       {!scanId ? (
-        <p className="animate-fade-in text-sm text-muted-foreground">Select a scan to view its plan.</p>
+        <EmptyState icon={ListChecks} title="Select a scan to view its plan" />
       ) : !isHybrid && targets.length === 0 ? (
-        <Card className="animate-fade-in">
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No per-module execution plan recorded for this scan yet.
-            <br />
-            Per-(target, module) job state is recorded as the reactive cascade runs;
-            it populates once network modules execute (or immediately under{" "}
-            <span className="font-mono">--hybrid</span>).
-          </CardContent>
-        </Card>
+        <EmptyState icon={ListChecks} title="No execution plan recorded yet"
+          description="Per-(target, module) job state records as the reactive cascade runs — it populates once network modules execute (or immediately under --hybrid)." />
       ) : (
         <div className="stagger grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {targets.map((t) => (
