@@ -130,6 +130,15 @@ def _apply_filters(rows: list[dict], *, scan_id, severity, report_stage, status,
     return [r for r in rows if keep(r)]
 
 
+def _conf(r: dict) -> float:
+    """Confidence as a float for sorting. Evidence JSON may store it as a string
+    (or omit it), so coerce defensively — a bad value sorts as 0.0, never raises."""
+    try:
+        return float(r.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _sort(rows: list[dict], sort: str) -> list[dict]:
     if sort == "time":
         return sorted(rows, key=lambda r: r["created_at"] or "", reverse=True)
@@ -137,8 +146,7 @@ def _sort(rows: list[dict], sort: str) -> list[dict]:
         order = {s: i for i, s in enumerate(_STAGES)}
         return sorted(rows, key=lambda r: order.get(r["report_stage"], 99))
     # default: severity then confidence
-    return sorted(rows, key=lambda r: (_SEV_RANK.get(r["severity"], 99),
-                                       -(r["confidence"] or 0.0)))
+    return sorted(rows, key=lambda r: (_SEV_RANK.get(r["severity"], 99), -_conf(r)))
 
 
 async def build_findings(db_url: str | None, *, scan_id: str | None = None,

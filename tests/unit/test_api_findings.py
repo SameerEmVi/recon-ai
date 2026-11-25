@@ -77,6 +77,28 @@ async def test_triage_rejects_bad_stage_and_ghost(db):
     assert (await set_triage(db["url"], str(uuid.uuid4()), report_stage="submitted"))["ok"] is False
 
 
+async def test_string_confidence_does_not_break_default_sort(tmp_path):
+    # Regression: evidence JSON may store confidence as a string (or omit it);
+    # the default severity+confidence sort must coerce it, not 500.
+    url = f"sqlite+aiosqlite:///{tmp_path / 'c.db'}"
+    engine = make_engine(url)
+    await init_db(engine)
+    sid = uuid.uuid4()
+    async with make_session_factory(engine)() as s:
+        s.add(ScanJob(id=sid, target_domain="example.com", mode="full", status="complete"))
+        s.add(Finding(scan_job_id=sid, host="a.example.com", title="A", description="d",
+                      category="c", severity_hint="high", evidence={"confidence": "0.9"}))
+        s.add(Finding(scan_job_id=sid, host="b.example.com", title="B", description="d",
+                      category="c", severity_hint="high", evidence={"confidence": "high"}))
+        s.add(Finding(scan_job_id=sid, host="c.example.com", title="C", description="d",
+                      category="c", severity_hint="low", evidence={}))
+        await s.commit()
+    await engine.dispose()
+    out = await build_findings(url, sort="severity")       # must not raise
+    assert out["total"] == 3
+    assert [f["severity"] for f in out["findings"]][:2] == ["high", "high"]
+
+
 async def test_export_csv(db):
     await set_triage(db["url"], db["f1"], report_stage="accepted")
     csv_text = await export_findings_csv(db["url"])
