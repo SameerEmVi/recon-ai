@@ -512,3 +512,40 @@ export interface ExecMap {
 }
 export const getExecMap = (scanId?: string) =>
   apiFetch<ExecMap>("/api/execmap" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
+
+// ── Exploration graph (reasoning map) ─────────────────────────────────────────
+export type ExploreKind = "start" | "goal" | "intent" | "fact" | "vulnerability";
+export type ExploreRel = "spawns" | "intent-chain" | "yields" | "proves";
+export interface ExploreNode {
+  id: string;
+  kind: ExploreKind;
+  label: string;
+  count?: number;
+  hosts?: number;
+  state?: string | null;
+  seed?: boolean;
+  etype?: string;
+  severity?: string;
+  category?: string;
+  host?: string;
+  mode?: string | null;
+  status?: string | null;
+  intents?: number;
+  events?: number;
+}
+export interface ExploreEdge {
+  id: string;
+  source: string;
+  target: string;
+  rel: ExploreRel;
+}
+export interface ExplorationMap {
+  scan: { scan_id: string; domain: string; status: string; mode: string } | null;
+  nodes: ExploreNode[];
+  edges: ExploreEdge[];
+  summary: { intents: number; facts: number; vulnerabilities: number; events: number };
+}
+export const getExploration = (scanId?: string) =>
+  apiFetch<ExplorationMap>(
+    "/api/exploration" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "")
+  );
