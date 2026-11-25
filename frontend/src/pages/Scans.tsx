@@ -2,13 +2,14 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X, Ban, ChevronDown, ChevronRight } from "lucide-react";
 import {
-  listScans, getCatalog, createScan, cancelScan, type ScanCreateBody, ApiError,
+  listScans, getCatalog, getConfig, createScan, cancelScan, type ScanCreateBody, ApiError,
 } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input, Textarea, Select, Field } from "@/components/ui/field";
 import { useToast } from "@/components/ui/toast";
+import { cn } from "@/lib/cn";
 
 const lines = (s: string): string[] | undefined => {
   const arr = s.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -27,6 +28,7 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const { data: catalog } = useQuery({ queryKey: ["catalog"], queryFn: getCatalog, staleTime: 60_000 });
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: 60_000 });
   const [domain, setDomain] = useState("");
   const [mode, setMode] = useState("active");
   const [inScope, setInScope] = useState("");
@@ -40,8 +42,13 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
   const [targets, setTargets] = useState("");
   const [profile, setProfile] = useState("chrome-windows");
   const [proxy, setProxy] = useState("");
+  const [ai, setAi] = useState(false);
+  const [agent, setAgent] = useState(false);
+  const [maxIter, setMaxIter] = useState("20");
   const [showModules, setShowModules] = useState(false);
   const [modules, setModules] = useState<Set<string>>(new Set());
+
+  const aiReady = !!config?.ai.available && !!config?.database.configured;
 
   const mutation = useMutation({
     mutationFn: (body: ScanCreateBody) => createScan(body),
@@ -73,6 +80,9 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
       targets: hybrid ? lines(targets) ?? null : null,
       browser_profile: profile,
       proxy: proxy.trim() || null,
+      ai: aiReady && (ai || agent),
+      agent: aiReady && agent,
+      max_iterations: Number(maxIter) || 20,
     };
     mutation.mutate(body);
   };
@@ -145,6 +155,40 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
                 <Field label="Targets (one host per line; blank = seed only)">
                   <Textarea value={targets} onChange={(e) => setTargets(e.target.value)}
                     placeholder={"www.example.com\napi.example.com"} />
+                </Field>
+              </div>
+            )}
+          </div>
+
+          {/* LLM in the loop (opt-in) */}
+          <div className="rounded-md border border-border p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">AI reasoning (LLM in the loop)</span>
+              {!aiReady && (
+                <span className="text-[11px] text-warning">
+                  {config && !config.ai.available ? "set ANTHROPIC_API_KEY on the server"
+                    : config && !config.database.configured ? "needs a database"
+                    : "unavailable"}
+                </span>
+              )}
+            </div>
+            <label className={cn("mt-2 flex items-center gap-2 text-sm", !aiReady && "opacity-50")}>
+              <input type="checkbox" checked={ai} disabled={!aiReady}
+                onChange={(e) => setAi(e.target.checked)} />
+              <span><span className="text-foreground">AI triage</span>
+                <span className="text-muted-foreground"> — post-scan: the LLM prioritises & correlates findings</span></span>
+            </label>
+            <label className={cn("mt-1.5 flex items-center gap-2 text-sm", !aiReady && "opacity-50")}>
+              <input type="checkbox" checked={agent} disabled={!aiReady}
+                onChange={(e) => { setAgent(e.target.checked); if (e.target.checked) setAi(true); }} />
+              <span><span className="text-foreground">Agent loop</span>
+                <span className="text-muted-foreground"> — in-loop: plans the goal into steps, then acts (probe / historical URLs / nuclei-info). Scope stays code-enforced.</span></span>
+            </label>
+            {agent && aiReady && (
+              <div className="mt-2 w-40">
+                <Field label="Max agent iterations">
+                  <Input type="number" min={1} max={100} value={maxIter}
+                    onChange={(e) => setMaxIter(e.target.value)} />
                 </Field>
               </div>
             )}

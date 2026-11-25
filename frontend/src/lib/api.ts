@@ -166,6 +166,7 @@ export interface AppConfig {
   auth: { token_set: boolean; token_source: "env" | "generated" };
   database: { configured: boolean; dialect: string | null };
   proxy: { env_configured: boolean };
+  ai: { available: boolean };
   cors_origins: string[];
   results_dir: string;
   defaults: { max_distance: number; workers: number; worker_ceiling: number; browser_profile: string };
@@ -245,6 +246,9 @@ export interface ScanCreateBody {
   targets?: string[] | null;
   browser_profile?: string;
   proxy?: string | null;
+  ai?: boolean;
+  agent?: boolean;
+  max_iterations?: number;
 }
 
 export interface ScanCreated {
