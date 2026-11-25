@@ -553,3 +553,82 @@ export const getExploration = (scanId?: string) =>
   apiFetch<ExplorationMap>(
     "/api/exploration" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "")
   );
+
+// ── Autonomous exploration engine (goal/intent/fact) ──────────────────────────
+export interface EngRun {
+  id: string; scan_id: string; title: string; target: string; status: string;
+  constraints: unknown; stop_reason: string | null; created_at: string | null;
+}
+export interface EngGoal {
+  id: string; parent_goal_id: string | null; title: string; description: string;
+  success_criteria: unknown; priority: number; state: string;
+  completion_reason: string | null; created_by: string; created_at: string | null;
+}
+export interface EngIntent {
+  id: string; goal_id: string; title: string; tool_name: string; target: string;
+  rationale: string; priority: number; required_capability: string | null; state: string;
+  approval_state: string; execution_summary: string | null; error: string | null;
+  created_at: string | null; completed_at: string | null;
+}
+export interface EngFact {
+  id: string; goal_id: string | null; intent_id: string | null; asset: string;
+  fact_type: string; title: string; content: unknown; confidence: number; source: string;
+  source_event_id: string | null; evidence_reference: string | null; created_at: string | null;
+}
+export interface EngActivity {
+  id: string; node_id: string | null; worker: string; activity_type: string;
+  tool_name: string | null; summary: string; data: unknown; timestamp: string | null;
+}
+export interface EngRound {
+  round_no: number; trigger: string; status: string; decision_summary: string | null;
+  operations_count: number; started_at: string | null; completed_at: string | null;
+}
+export type EngNodeKind = "objective" | "goal" | "intent" | "fact" | "hint" | "finding" | "digest";
+export interface EngNode {
+  id: string; kind: EngNodeKind; label: string; state?: string; priority?: number;
+  tool?: string; fact_type?: string; confidence?: number; count?: number;
+}
+export interface EngEdge { id: string; source: string; target: string; rel: string }
+export interface EngGraph {
+  run: EngRun | null; nodes: EngNode[]; edges: EngEdge[];
+  summary: { goals: number; intents: number; facts: number; by_kind: Record<string, number> };
+  truncated: boolean;
+}
+
+const engQ = (scanId?: string, explorationId?: string): string => {
+  const p = new URLSearchParams();
+  if (scanId) p.set("scan_id", scanId);
+  if (explorationId) p.set("exploration_id", explorationId);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+};
+
+export const listExplorations = () =>
+  apiFetch<{ explorations: EngRun[] }>("/api/explorations");
+export const getEngineGraph = (scanId?: string, eid?: string) =>
+  apiFetch<EngGraph>("/api/exploration/engine-graph" + engQ(scanId, eid));
+export const getEngGoals = (scanId?: string, eid?: string) =>
+  apiFetch<{ run: EngRun | null; goals: EngGoal[] }>("/api/exploration/goals" + engQ(scanId, eid));
+export const getEngIntents = (scanId?: string, eid?: string) =>
+  apiFetch<{ run: EngRun | null; intents: EngIntent[] }>("/api/exploration/intents" + engQ(scanId, eid));
+export const getEngFacts = (scanId?: string, eid?: string) =>
+  apiFetch<{ run: EngRun | null; facts: EngFact[]; total: number }>("/api/exploration/facts" + engQ(scanId, eid));
+export const getEngActivities = (scanId?: string, eid?: string) =>
+  apiFetch<{ run: EngRun | null; activities: EngActivity[] }>("/api/exploration/activities" + engQ(scanId, eid));
+export const getEngRounds = (scanId?: string, eid?: string) =>
+  apiFetch<{ run: EngRun | null; rounds: EngRound[] }>("/api/exploration/rounds" + engQ(scanId, eid));
+export const getEngNode = (nodeId: string, scanId?: string, eid?: string) =>
+  apiFetch<Record<string, unknown>>(`/api/exploration/node/${nodeId}` + engQ(scanId, eid));
+
+const engPost = (path: string, body?: unknown) =>
+  apiFetch<{ ok?: boolean; status?: string; [k: string]: unknown }>(path,
+    { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
+export const engPause = (eid: string) => engPost(`/api/exploration/${eid}/pause`);
+export const engResume = (eid: string) => engPost(`/api/exploration/${eid}/resume`);
+export const engStop = (eid: string, reason?: string) => engPost(`/api/exploration/${eid}/stop`, { reason });
+export const engReplan = (eid: string) => engPost(`/api/exploration/${eid}/replan`);
+export const engApproveIntent = (eid: string, iid: string) => engPost(`/api/exploration/${eid}/intent/${iid}/approve`);
+export const engRejectIntent = (eid: string, iid: string, reason?: string) => engPost(`/api/exploration/${eid}/intent/${iid}/reject`, { reason });
+export const engCancelIntent = (eid: string, iid: string) => engPost(`/api/exploration/${eid}/intent/${iid}/cancel`);
+export const engPrioritizeGoal = (eid: string, gid: string, priority: number) => engPost(`/api/exploration/${eid}/goal/${gid}/prioritize`, { priority });
+export const engBlockGoal = (eid: string, gid: string, reason?: string) => engPost(`/api/exploration/${eid}/goal/${gid}/block`, { reason });

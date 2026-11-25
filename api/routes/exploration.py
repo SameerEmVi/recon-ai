@@ -48,6 +48,16 @@ async def exploration(request: Request, scan_id: str | None = None) -> dict:
 
 # ── engine reads ────────────────────────────────────────────────────────────────
 
+@router.get("/explorations")
+async def explorations(request: Request) -> dict:
+    from exploration.views import list_explorations
+    db = _db(request)
+    if not db:
+        return {"explorations": []}
+    async with _session(db) as s:
+        return {"explorations": await list_explorations(s)}
+
+
 @router.get("/exploration/goals")
 async def goals(request: Request, scan_id: str | None = None, exploration_id: str | None = None) -> dict:
     from exploration.views import list_goals, resolve_run, run_summary

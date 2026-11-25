@@ -21,8 +21,21 @@ from database.exploration_models import (
 _MAX_GRAPH_FACTS = 400
 
 
+async def list_explorations(session, limit: int = 100) -> list[dict]:
+    """All explorations (newest first) — the Exploration workspace selects one of
+    these, independent of the in-memory scan registry."""
+    rows = (await session.execute(
+        select(ExplorationRun).order_by(ExplorationRun.created_at.desc()).limit(limit))).scalars().all()
+    return [run_summary(r) for r in rows]
+
+
 async def resolve_run(session, *, scan_id: Optional[str] = None,
                      exploration_id: Optional[str] = None) -> Optional[ExplorationRun]:
+    # Neither id given → the most recent exploration (so a fresh client still
+    # lands on something without first knowing an id).
+    if not scan_id and not exploration_id:
+        return (await session.execute(
+            select(ExplorationRun).order_by(ExplorationRun.created_at.desc()).limit(1))).scalar_one_or_none()
     try:
         if exploration_id:
             return (await session.execute(select(ExplorationRun).where(
