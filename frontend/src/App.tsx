@@ -13,6 +13,7 @@ import Traffic from "@/pages/Traffic";
 // route is opened, keeping the main bundle lean.
 const Map = lazy(() => import("@/pages/Map"));
 const ToolMap = lazy(() => import("@/pages/ToolMap"));
+const Exploration = lazy(() => import("@/pages/Exploration"));
 import Vulnerabilities from "@/pages/Vulnerabilities";
 import Findings from "@/pages/Findings";
 import Skills from "@/pages/Skills";
@@ -41,6 +42,14 @@ export default function App() {
             element={
               <Suspense fallback={<div className="text-sm text-muted-foreground">Loading…</div>}>
                 <ToolMap />
+              </Suspense>
+            }
+          />
+          <Route
+            path="exploration"
+            element={
+              <Suspense fallback={<div className="text-sm text-muted-foreground">Loading…</div>}>
+                <Exploration />
               </Suspense>
             }
           />
