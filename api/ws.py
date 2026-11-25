@@ -83,8 +83,16 @@ class LiveHub:
 
 
 def start_live_monitor(hub: LiveHub, controller, scan_id: str) -> asyncio.Task:
-    """Subscribe a bus observer + start a 1 Hz stats sampler. Returns the sampler
-    task (the caller cancels it when the scan ends)."""
+    """In-process live monitor: publish frames straight into the hub."""
+    return attach_live_monitor(controller, scan_id, hub.publish)
+
+
+def attach_live_monitor(controller, scan_id: str, publish) -> asyncio.Task:
+    """Subscribe a bus observer + start a 1 Hz stats sampler, routing every frame
+    to `publish` (an async callable taking one frame dict). The in-process web
+    server passes `hub.publish`; the out-of-process scan worker passes a function
+    that appends the frame to its live-frames file. Returns the sampler task (the
+    caller cancels it when the scan ends)."""
     from events.types import EventType
 
     from api.graph import graph_delta
@@ -112,7 +120,7 @@ def start_live_monitor(hub: LiveHub, controller, scan_id: str) -> asyncio.Task:
                 frame["graph"] = {"nodes": nodes, "edges": edges}
         except Exception as exc:
             log.debug("graph delta failed for %s: %s", etype, exc)
-        await hub.publish(frame)
+        await publish(frame)
 
     try:
         for et in EventType:
@@ -124,7 +132,7 @@ def start_live_monitor(hub: LiveHub, controller, scan_id: str) -> asyncio.Task:
     # the hub so the Plan board updates live. Observe-only — the controller swallows
     # a raising listener, so this can never affect scheduling.
     async def on_scheduler(name: str, payload: dict) -> None:
-        await hub.publish({
+        await publish({
             "kind": "plan", "scan_id": scan_id,
             "event": name,
             "target": payload.get("target"),
@@ -150,7 +158,7 @@ def start_live_monitor(hub: LiveHub, controller, scan_id: str) -> asyncio.Task:
                     pool = controller.live_pool_stats
                     if pool is not None:
                         frame["pool"] = pool
-                await hub.publish(frame)
+                await publish(frame)
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise

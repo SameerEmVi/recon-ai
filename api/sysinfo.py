@@ -42,6 +42,9 @@ def build_config(settings, version: str) -> dict:
             "dialect": _db_dialect(settings.db_url),
         },
         "proxy": {"env_configured": bool(os.environ.get("RECON_AI_PROXY"))},
+        # Whether an LLM key is present → the scan form can offer the AI/agent
+        # toggles. The key itself is never exposed, only its presence.
+        "ai": {"available": bool(os.environ.get("ANTHROPIC_API_KEY"))},
         "cors_origins": list(settings.cors_origins),
         "results_dir": settings.results_dir,
         "defaults": {

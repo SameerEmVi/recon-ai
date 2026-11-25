@@ -65,6 +65,7 @@ class ScanController:
         ai_model: str = "claude-sonnet-4-6",
         max_agent_iterations: int = 20,
         agent_plan_first: bool = True,   # plan→execute: decompose the goal up front, then work the steps
+        scan_id: object | None = None,   # pin the scan id (worker process); None = generate
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
@@ -160,7 +161,7 @@ class ScanController:
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
         self._agent_plan_first = agent_plan_first
-        self._scan_id = uuid.uuid4()
+        self._scan_id = uuid.UUID(str(scan_id)) if scan_id else uuid.uuid4()
         # Browser header profile — resolved ONCE and kept stable for the whole
         # scan (no per-request rotation). The scan id seeds 'random' so a scan
         # stays on one fingerprint and reruns reproduce. A bad name raises

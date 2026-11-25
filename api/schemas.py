@@ -40,6 +40,10 @@ class ScanCreate(BaseModel):
     # Misc
     browser_profile: str = "chrome-windows"
     proxy: str | None = None
+    # LLM in the loop (opt-in; needs ANTHROPIC_API_KEY on the server + a DB).
+    ai: bool = False          # post-scan LLM triage
+    agent: bool = False       # agentic decide→plan→act loop (implies ai)
+    max_iterations: int = Field(20, ge=1, le=100)   # agent iteration cap
 
 
 class ScanCreated(BaseModel):
