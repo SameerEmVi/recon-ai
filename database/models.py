@@ -268,3 +268,9 @@ class AiAssessment(SQLModel, table=True):
     assessment: Optional[Any] = Field(default=None, sa_column=Column(JSON))
     model_used: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+# ── Autonomous exploration engine domain model ──────────────────────────────────
+# Imported here so its tables register with SQLModel.metadata (create_all /
+# init_db) alongside the core models. See database/exploration_models.py.
+from database import exploration_models as _exploration_models  # noqa: E402,F401
