@@ -19,6 +19,7 @@ from database.repository import (
     EventRepository,
     FindingRepository,
     HostRepository,
+    HttpExchangeRepository,
     JobRepository,
     ScanRepository,
 )
@@ -36,6 +37,7 @@ class Persister:
         self._finding_repo = FindingRepository(session)
         self._assessment_repo = AiAssessmentRepository(session)
         self._job_repo = JobRepository(session)
+        self._exchange_repo = HttpExchangeRepository(session)
         # A single AsyncSession is NOT safe for concurrent use. The controller
         # fires save_event() as many parallel background tasks, so every write
         # must be serialized through this lock — otherwise overlapping commit()/
@@ -92,6 +94,53 @@ class Persister:
     async def list_jobs(self, scan_id: UUID, *, state: str | None = None) -> list[JobRecord]:
         async with self._lock:
             return await self._job_repo.list_for_scan(scan_id, state=state)
+
+    # ── evidence store: captured HTTP exchanges ───────────────────────────────
+    async def save_exchange(self, exchange) -> UUID | None:
+        """Persist one captured HttpExchange (already redacted + encrypted by
+        evidence.build_exchange). Serialized and never raises into the scan loop;
+        returns the stored id, or None on failure."""
+        async with self._lock:
+            try:
+                saved = await self._exchange_repo.save(exchange)
+                return saved.id
+            except Exception as exc:
+                log.debug("db: save_exchange failed (%s) — rolling back", exc)
+                await self._session.rollback()
+                return None
+
+    async def link_exchange(self, exchange_id: UUID, finding_id: UUID) -> bool:
+        """Bind a stored exchange to the finding it proves (first claim wins)."""
+        async with self._lock:
+            try:
+                return await self._exchange_repo.link_to_finding(exchange_id, finding_id)
+            except Exception as exc:
+                log.debug("db: link_exchange failed (%s) — rolling back", exc)
+                await self._session.rollback()
+                return False
+
+    async def save_finding(self, finding):
+        """Persist one Finding synchronously and return it (with its id) — the
+        evidence-bound path the agent-driven pentest tools use, where the finding
+        is created deterministically by code, not materialized from an event, so
+        its exchanges can be linked straight away. Serialized; returns None on
+        failure (never raises into the caller)."""
+        async with self._lock:
+            try:
+                return await self._finding_repo.save(finding)
+            except Exception as exc:
+                log.debug("db: save_finding failed (%s) — rolling back", exc)
+                await self._session.rollback()
+                return None
+
+    async def find_finding(self, scan_id: UUID, host: str, title: str, category: str):
+        """The existing finding with this dedup identity, or None — lets the
+        pentest tools re-bind evidence to a finding instead of duplicating it."""
+        async with self._lock:
+            try:
+                return await self._finding_repo.find_by_identity(scan_id, host, title, category)
+            except Exception:
+                return None
 
     async def record_module_job(
         self, scan_id: UUID, target: str, module: str, state: str,

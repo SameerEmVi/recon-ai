@@ -158,7 +158,7 @@ async def test_basemodule_fetch_allowed_in_active_uses_cache_path(monkeypatch):
 
 # ── 6. out-of-scope remains blocked in EVERY mode ─────────────────────────────
 
-@pytest.mark.parametrize("mode", ["osint", "vuln", "active", "full"])
+@pytest.mark.parametrize("mode", ["osint", "recon", "pentest", "vuln", "active", "full"])
 async def test_scope_still_enforced_in_every_mode(mode):
     from controller.controller import ScanController
     from events.types import Event, EventType, SubdomainData
@@ -178,7 +178,7 @@ async def test_scope_still_enforced_in_every_mode(mode):
 
 # ── 7. core services (limiter, cache, policy, dedup) still wired in each mode ─
 
-@pytest.mark.parametrize("mode", ["osint", "vuln", "active", "full"])
+@pytest.mark.parametrize("mode", ["osint", "recon", "pentest", "vuln", "active", "full"])
 def test_core_services_present_in_every_mode(mode):
     from controller.controller import ScanController
     from ratelimit import RateLimiter
@@ -189,7 +189,10 @@ def test_core_services_present_in_every_mode(mode):
     ctrl = ScanController(scope, mode=mode, results_enabled=False)
     assert isinstance(ctrl.rate_limiter, RateLimiter)
     assert isinstance(ctrl.response_cache, ResponseCache)
-    assert isinstance(ctrl.policy, CapabilityPolicy) and ctrl.policy.mode == mode
+    # The policy (and the scan row) carry the canonical tier: active/full → pentest.
+    from policy import resolve_mode
+    assert isinstance(ctrl.policy, CapabilityPolicy)
+    assert ctrl.policy.mode == resolve_mode(mode)[0]
 
 
 def test_get_policy_test_safety_fallback():
@@ -246,14 +249,15 @@ def test_check_raises_on_disallowed_capability():
     pol.check(CAP_PASSIVE_EXTERNAL)   # allowed → no raise
 
 
-def test_unclassified_module_fail_closed_except_full():
+@pytest.mark.parametrize("mode", ["osint", "recon", "pentest", "vuln", "active", "full"])
+def test_unclassified_module_fail_closed_in_every_tier(mode):
+    # Tiers made this strict everywhere (it used to be allowed in `full`): every
+    # registered module is classified, so this only ever blocks a new, unaudited one.
     class Mystery:
         name = "mystery-new-module"
         capabilities: list = []
-    assert CapabilityPolicy("osint").module_allowed(Mystery)[0] is False
-    assert CapabilityPolicy("active").module_allowed(Mystery)[0] is False
-    ok, reason = CapabilityPolicy("full").module_allowed(Mystery)
-    assert ok is True and "unclassified" in reason
+    ok, reason = CapabilityPolicy(mode).module_allowed(Mystery)
+    assert ok is False and "unclassified" in reason
 
 
 def test_explicit_classvar_overrides_table():

@@ -238,6 +238,12 @@ class AgentLoop:
                     )
 
             # ── approve ───────────────────────────────────────────────────────
+            # Tag the decision with the tool's risk so the gate can require a
+            # human sign-off for high-risk (vuln/intrusive) actions.
+            from agent.tools import tool_risk
+            _tool = self._tools.get(decision.action)
+            if _tool is not None:
+                decision.risk = tool_risk(_tool)
             approved = await self._gate.check(decision)
             if not approved:
                 # A rejected plan step is skipped (the plan continues); a

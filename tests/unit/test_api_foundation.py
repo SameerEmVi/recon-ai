@@ -151,6 +151,7 @@ async def test_catalog_lists_modules_modes_profiles():
         r = await client.get("/api/catalog", headers=AUTH)
     assert r.status_code == 200
     body = r.json()
-    assert set(body["modes"]) >= {"osint", "vuln", "active", "full"}
+    assert body["modes"] == ["osint", "recon", "pentest"]       # the selectable tiers
+    assert "tier" in body["modules"][0]
     assert len(body["modules"]) > 0 and "name" in body["modules"][0]
     assert any(p["name"] == "full" for p in body["profiles"])

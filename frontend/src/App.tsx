@@ -16,6 +16,7 @@ const ToolMap = lazy(() => import("@/pages/ToolMap"));
 const Exploration = lazy(() => import("@/pages/Exploration"));
 import Vulnerabilities from "@/pages/Vulnerabilities";
 import Findings from "@/pages/Findings";
+import Pentest from "@/pages/Pentest";
 import Skills from "@/pages/Skills";
 import Diagnostics from "@/pages/Diagnostics";
 import Settings from "@/pages/Settings";
@@ -57,6 +58,7 @@ export default function App() {
           <Route path="assets" element={<Assets />} />
           <Route path="vulnerabilities" element={<Vulnerabilities />} />
           <Route path="findings" element={<Findings />} />
+          <Route path="pentest" element={<Pentest />} />
           <Route path="skills" element={<Skills />} />
           <Route path="diagnostics" element={<Diagnostics />} />
           <Route path="settings" element={<Settings />} />

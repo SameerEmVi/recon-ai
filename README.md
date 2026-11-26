@@ -77,7 +77,7 @@ pip install -e ".[sqlite,ai,mcp,dev]"
 External binaries are optional per module (modules warn-and-skip if a binary is
 missing). Commonly used: subfinder, dnsx, httpx (ProjectDiscovery), naabu,
 katana, nuclei, ffuf. Port scanning uses **naabu** by default; **RustScan** is
-an opt-in alternative (`-m rustscan`, active/full modes only — see INSTALL.md).
+an opt-in alternative (`-m rustscan`, recon/pentest tiers only — see INSTALL.md).
 Directory/content discovery uses the **ffuf** binary
 (the `ffuf` module), which is required for content discovery. The pure-Python
 **extfuzz** module complements it (no binary): it fuzzes file extensions on
@@ -85,30 +85,38 @@ already-discovered paths (`app.js` → `app.js.map`/`.bak`, `download.php` →
 `download.bak`) to surface source maps, backups, configs and dumps that a
 word-based fuzzer can't reach.
 
-### Execution modes
+### Execution tiers
 
-Scans are **mode-based** — `--mode` is both the default module set and a
-capability ceiling enforced centrally (at module loading, the network
-primitives, and the AI agent tools), not just CLI filtering:
+Scans run in one of three **tiers**, each including the one before it. The tier
+is both the default module set and a capability ceiling enforced centrally (at
+module loading, the network primitives, and the AI agent tools), not just CLI
+filtering:
 
-| Mode | What runs | Guarantee |
-|---|---|---|
-| `osint` | passive external intelligence only | **technically unable** to send any direct target request, DNS brute, fuzzing, port scan or vuln check |
-| `vuln` | minimal discovery + vulnerability assessment | no fuzzing / port scanning / brute force |
-| `active` | passive + full active recon + non-intrusive vuln checks | intrusive tier off unless `--intrusive` |
-| `full` | complete authorized pipeline | intrusive tier off unless `--intrusive` |
+| Tier | What runs | Touches the target? | Guarantee |
+|---|---|---|---|
+| `osint` | passive external intelligence: subdomains, historic URLs, cloud/leak intel | Never | **technically unable** to send any direct target request, DNS query, fuzzing, port scan or vuln check |
+| `recon` | + active discovery: resolve, probe, port-scan, fingerprint, crawl, fuzz | Discovery only | no vulnerability checks, no attack payloads |
+| `pentest` | + evidence-based vulnerability checks | Testing | intrusive tier off unless `--intrusive` |
 
 ```bash
-recon-ai scan example.com --mode osint     # passive only
-recon-ai scan example.com --mode active     # active recon + assessment
+recon-ai osint example.com       # = recon-ai scan example.com --mode osint
+recon-ai recon example.com       # passive + active enumeration
+recon-ai pentest example.com     # + vulnerability assessment
+recon-ai modules                 # every module with its tier
 ```
 
 Each module is classified by **behaviour** (what it does to the target), not by
 name — so `subfinder` (passive API queries) runs in `osint`, while `metascan`
-(downloads files from the target) does not. The ScopeEngine remains the
-authoritative scope gate; a mode never widens scope. Legacy `--profile`/`--full`/
-`--passive`/`-m` still work and are filtered by the mode ceiling (no `--mode` →
-unchanged, active-ceiling behaviour).
+(downloads files from the target) does not. A module's tier is derived from that
+classification (the lowest tier whose ceiling permits it), so it can't drift from
+what is enforced. The ScopeEngine remains the authoritative scope gate; a tier
+never widens scope.
+
+**Legacy modes** are accepted for one release as deprecated aliases: `active` and
+`full` mean `pentest` (identical capabilities); `vuln` keeps its narrower legacy
+ceiling (no fuzzing / port scanning / brute force) rather than being silently
+widened. Legacy `--profile`/`--full`/`--passive`/`-m` still work and are filtered
+by the tier ceiling (no `--mode` → unchanged behaviour, pentest ceiling).
 
 On top of reconnaissance, the **vulnassess** module (the `vulnscan/` package)
 runs an evidence-based vulnerability assessment over the discovered intelligence
@@ -191,4 +199,5 @@ pytest          # config in pyproject.toml; asyncio_mode=auto
 ## Status
 
 All core phases complete (scope engine → events/DB/recon → AI triage → agent
-loop → module system + MCP). 534 tests passing.
+loop → module system + MCP), plus later subsystems (planner, vuln assessment,
+execution tiers, web console). 1118 tests passing.

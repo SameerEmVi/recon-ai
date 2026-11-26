@@ -12,8 +12,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-# The execution modes the policy layer enforces (kept in sync with policy.MODES).
-Mode = Literal["osint", "vuln", "active", "full"]
+# The execution tiers the policy layer enforces (kept in sync with policy.MODES):
+# osint → recon → pentest, plus the deprecated legacy names (active/full = pentest).
+Mode = Literal["osint", "recon", "pentest", "vuln", "active", "full"]
 ScanStatusValue = Literal["running", "complete", "failed", "cancelled", "not_found", "unknown"]
 
 
@@ -24,7 +25,7 @@ class ScanCreate(BaseModel):
     out_scope: list[str] = Field(default_factory=list, description="Deny rules (deny wins).")
     max_distance: int = Field(5, ge=0, le=10)
     wildcard_apex: bool = False
-    mode: Mode = "active"
+    mode: Mode = "pentest"
     modules: list[str] | None = Field(None, description="Explicit module list; else mode defaults.")
     # Rate / concurrency (None = unlimited; adaptive WAF backoff still applies).
     rate_limit: float | None = Field(None, gt=0)

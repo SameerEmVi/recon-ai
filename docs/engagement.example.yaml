@@ -1,0 +1,35 @@
+# Engagement policy file — the per-target authorization record.
+# Pass with: recon-ai scan <domain> --engagement engagement.yaml
+#
+# When present, this file is the authority for scope and for whether the
+# intrusive tier may unlock. Fail-closed: intrusive testing runs ONLY when this
+# file both opts in (intrusive: true) AND carries an authorization statement.
+
+target: example.com
+
+# REQUIRED before any intrusive testing. A human-meaningful record of who
+# authorized this engagement and against what scope snapshot.
+authorization: "Bug bounty program ACME — scope snapshot 2026-11-26, ref #123"
+
+# Capability ceiling: osint | recon | pentest. (Each tier includes the one before.)
+tier: pentest
+
+# May the intrusive tier unlock? Needs `authorization` above to take effect, and
+# still requires --intrusive on the command line.
+intrusive: false
+
+scope:
+  in:
+    - "*.example.com"
+    - "example.com"
+  out:
+    - "admin.example.com"      # deny wins; also excludes *.admin.example.com
+  max_distance: 5
+
+# Pacing (optional). Used as defaults; an explicit CLI -r/-c overrides.
+rate_limit: 5                   # requests/sec per bucket
+max_concurrency: 10
+
+# Tools/modules that must never run for this engagement (program rules).
+banned_tools:
+  - sqlmap

@@ -168,7 +168,9 @@ class ScanManager:
     async def _launch_in_process(self, cfg: ScanCreate, scope) -> ScanEntry:
         controller = self._factory(cfg, scope)
         scan_id = str(getattr(controller, "scan_id", uuid.uuid4()))
-        entry = ScanEntry(scan_id=scan_id, domain=cfg.domain, mode=cfg.mode,
+        from policy import resolve_mode
+        entry = ScanEntry(scan_id=scan_id, domain=cfg.domain,
+                          mode=resolve_mode(cfg.mode)[0],   # canonical tier
                           controller=controller)
         self._entries[scan_id] = entry
 

@@ -10,6 +10,9 @@ dependencies = [
     "alembic>=1.13",
     "httpx>=0.27",
     "pyyaml>=6.0",
+    # SQLAlchemy's async engine (every --db-url path) needs greenlet, which is
+    # not pulled in automatically on every platform (e.g. macOS arm64).
+    "greenlet>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -23,12 +26,19 @@ ai = [
     "anthropic>=0.30",
 ]
 mcp = [
-    "mcp>=1.0",
+    # mcp 2.x renamed FastMCP; pinned until mcpserver/ is ported.
+    "mcp>=1.0,<2",
 ]
 web = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "websockets>=13",
+]
+evidence = [
+    # At-rest encryption of captured request/response bodies in the evidence
+    # store (RECON_AI_EVIDENCE_KEY). Imported lazily: only configuring a key
+    # needs it. See docs/pentest-section-design.md §6.
+    "cryptography>=42",
 ]
 dev = [
     "pytest>=8.0",

@@ -65,13 +65,12 @@ class ScanController:
         ai_model: str = "claude-sonnet-4-6",
         max_agent_iterations: int = 20,
         agent_plan_first: bool = True,   # plan→execute: decompose the goal up front, then work the steps
-        scan_id: object | None = None,   # pin the scan id (worker process); None = generate
         exploration_enabled: bool = True,  # build a goal-driven exploration from the scan's data at finish
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
         # Execution mode & capability policy (osint | active | vuln | full)
-        mode: str = "active",
+        mode: str = "pentest",
         intrusive_authorized: bool = False,
         # Adaptive Reconnaissance Planner
         plan_mode: str = "default",          # passive-first | default | aggressive
@@ -98,6 +97,10 @@ class ScanController:
         # out of authorization). Applies in active/full only (PORT_SCANNING gate).
         scan_resolved_ips: bool = True,
         scan_cdn_ips: bool = False,
+        # Pin/adopt the scan id instead of minting a new one — used by the worker
+        # process and to run a one-off tool (the pentest section's assess) against
+        # a finished recon scan so its findings/evidence attach to that same scan.
+        scan_id: "uuid.UUID | None" = None,
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -132,7 +135,8 @@ class ScanController:
         # Central capability policy — fail-closed on an invalid mode.
         from policy import CapabilityPolicy
         self._policy = CapabilityPolicy(mode, intrusive_authorized=intrusive_authorized)
-        self._mode = mode
+        # Canonical tier (legacy active/full → pentest) — what the scan row records.
+        self._mode = self._policy.mode
         self._disabled_modules: list[tuple[str, str]] = []
         from planner import PlannerConfig, ReconPlanner
         self._planner = ReconPlanner(
@@ -170,6 +174,11 @@ class ScanController:
         # ValueError here (fail-closed) rather than silently sending defaults.
         from net.headers import resolve as _resolve_headers
         self._headers = _resolve_headers(browser_profile, seed=str(self._scan_id))
+        # Evidence-store cipher (at-rest body encryption for captured exchanges).
+        # Keyed from RECON_AI_EVIDENCE_KEY; disabled (bodies not stored) when
+        # unset — fail-closed. A bad key raises here rather than silently off.
+        from evidence.crypto import EvidenceCipher
+        self._evidence_cipher = EvidenceCipher.from_env()
         self._persister: Persister | None = None
         self._knowledge_base: "KnowledgeBase | None" = None
         # The async DB engine + the two sessions opened on it (persister, KB),
@@ -766,6 +775,18 @@ class ScanController:
         return self._headers
 
     @property
+    def evidence_cipher(self):
+        """The scan's EvidenceCipher (at-rest body encryption for the evidence
+        store; disabled when RECON_AI_EVIDENCE_KEY is unset)."""
+        return self._evidence_cipher
+
+    @property
+    def persister(self):
+        """The scan's Persister (None when no --db-url). Read-only accessor so
+        tools/modules can store evidence without reaching a private attribute."""
+        return self._persister
+
+    @property
     def scheduler_report(self):
         """The hybrid engine's SchedulerReport (None unless a --hybrid run ran)."""
         return self._scheduler_report
@@ -818,11 +839,16 @@ class ScanController:
             log.warning("diagnostics disabled: %s", exc)
             self._diagnostics = None
 
-    async def _init_db(self) -> None:
+    async def attach_persistence(self) -> None:
+        """Open the DB engine/session + persister (+ KB) WITHOUT recording a scan
+        row. Used by `_init_db` (which then records the scan) and by a one-off
+        tool run that attaches to an EXISTING scan — the pentest section, where
+        `scan_id` was set to the finished recon scan so new findings/evidence
+        land under it. Idempotent-safe: call once, pair with `_teardown_db`."""
         from database.persister import Persister
         from database.session import init_db, make_engine, make_session_factory
         engine = make_engine(self._db_url)  # type: ignore[arg-type]
-        await init_db(engine)
+        await init_db(engine)                   # create_all is harmless if tables exist
         self._db_engine = engine                # retained for clean teardown
         factory = make_session_factory(engine)
         session = factory()
@@ -833,6 +859,9 @@ class ScanController:
         from database.knowledge_base import KnowledgeBase
         self._kb_session = factory()
         self._knowledge_base = KnowledgeBase(self._kb_session)
+
+    async def _init_db(self) -> None:
+        await self.attach_persistence()
         scope_config = {
             "in_scope": [r.raw for r in self._scope.in_scope],
             "out_scope": [r.raw for r in self._scope.out_scope],

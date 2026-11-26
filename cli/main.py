@@ -133,23 +133,32 @@ def scan(
     full: bool = typer.Option(
         False, "--full",
         help="Enable ALL modules: default + passive + web + crawl + discovery. "
-             "(Legacy; prefer --mode full. Equivalent to --mode full when no --mode given.)",
+             "(Legacy; prefer --mode pentest / `recon-ai pentest`.)",
     ),
     mode: str | None = typer.Option(
         None, "--mode",
         help=(
-            "Execution mode — the central capability ceiling AND default module set:\n"
+            "Execution tier — the central capability ceiling AND default module set "
+            "(each tier includes the one before):\n"
             "osint = passive external intel only (NO target probing/fuzzing/scanning); "
-            "vuln = minimal discovery + vulnerability assessment; "
-            "active = passive + full active recon + non-intrusive vuln checks; "
-            "full = complete authorized pipeline. "
-            "Enforced throughout execution (incl. the AI agent). Omit = legacy behaviour "
-            "(active ceiling + your -m/--profile/--full selection)."
+            "recon = + active discovery: resolve, probe, port-scan, crawl, fuzz; "
+            "pentest = + evidence-based vulnerability checks (--intrusive adds the "
+            "intrusive tier). Enforced throughout execution (incl. the AI agent). "
+            "Same as `recon-ai osint|recon|pentest`. Legacy active/full (= pentest) "
+            "and vuln are deprecated aliases. Omit = legacy behaviour (pentest "
+            "ceiling + your -m/--profile/--full selection)."
         ),
+    ),
+    engagement: str | None = typer.Option(
+        None, "--engagement",
+        help="Path to an engagement.yaml (authorization record): sets scope, "
+             "pacing, tier and — via its explicit `authorization` field — whether "
+             "the intrusive tier may unlock. When given, it is the authority for "
+             "scope + intrusive authorization (CLI --intrusive alone cannot unlock).",
     ),
     intrusive: bool = typer.Option(
         False, "--intrusive",
-        help="Authorize the INTRUSIVE check tier (active/full modes only). Off by "
+        help="Authorize the INTRUSIVE check tier (pentest tier only). Off by "
              "default; requires explicit opt-in. Never enables destructive payloads.",
     ),
     # ── related (sibling) root domains ────────────────────────────────────────
@@ -319,8 +328,29 @@ def scan(
         ui.set_color(color)
     print(ui.banner())
 
-    resolved_in = list(in_scope) or [f"*.{domain}", domain]
-    resolved_out = list(out_scope)
+    # Engagement file (optional): the authorization record. When present it
+    # supplies scope / pacing / tier defaults and is the authority for intrusive
+    # testing (fail-closed if it can't be loaded).
+    eng = None
+    if engagement is not None:
+        from policy import EngagementError, load_engagement
+        try:
+            eng = load_engagement(engagement)
+        except EngagementError as exc:
+            typer.echo(f"[error] {exc}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(ui.kv("engagement", f"{engagement} — tier {eng.tier}, intrusive "
+                         f"{'authorized' if eng.authorizes_intrusive() else 'off'}"))
+
+    resolved_in = list(in_scope) or (eng.in_scope if eng and eng.in_scope else None) \
+        or [f"*.{domain}", domain]
+    resolved_out = list(out_scope) or (eng.out_scope if eng else [])
+    if eng and max_distance == 5:
+        max_distance = eng.max_distance
+    if eng and eng.rate_limit is not None and rate_limit is None:
+        rate_limit = eng.rate_limit
+    if eng and eng.max_concurrency is not None and max_concurrency is None:
+        max_concurrency = eng.max_concurrency
 
     try:
         scope = Scope.from_strings(
@@ -385,15 +415,28 @@ def scan(
         typer.echo(f"[error] unknown --plan-mode {plan_mode!r}. Available: {', '.join(MODES)}", err=True)
         raise typer.Exit(code=1)
 
-    # Execution mode = the central capability ceiling. Fail-closed on an invalid
-    # value; default "active" preserves legacy behaviour when --mode is omitted.
-    from policy import MODES as EXEC_MODES
-    if mode is not None and mode not in EXEC_MODES:
-        typer.echo(f"[error] unknown --mode {mode!r}. Available: {', '.join(EXEC_MODES)}", err=True)
-        raise typer.Exit(code=1)
-    exec_mode = mode or "active"
-    if intrusive and exec_mode not in ("active", "full"):
-        typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' mode (only active/full)"))
+    # Execution tier = the central capability ceiling. Fail-closed on an invalid
+    # value; legacy names resolve to their tier (active/full → pentest) with a
+    # deprecation note. Omitted = pentest ceiling, identical to the old default.
+    from policy import CapabilityDenied, intrusive_capable, resolve_mode
+    # Default tier: --mode, else the engagement's tier, else pentest.
+    exec_mode = eng.tier if (eng and mode is None) else "pentest"
+    if mode is not None:
+        try:
+            exec_mode, deprecation = resolve_mode(mode)
+        except CapabilityDenied as exc:
+            typer.echo(f"[error] {exc}", err=True)
+            raise typer.Exit(code=1)
+        if deprecation:
+            typer.echo(ui.warn(deprecation))
+    if intrusive and not intrusive_capable(exec_mode):
+        typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' (pentest tier only)"))
+    # With an engagement file, it is the authority for intrusive testing: the
+    # file must authorize it (explicit `authorization` + `intrusive: true`). A
+    # bare --intrusive cannot unlock it. Without a file, --intrusive behaves as before.
+    if eng is not None and intrusive and not eng.authorizes_intrusive():
+        typer.echo(ui.warn("--intrusive not authorized by the engagement file "
+                            "(needs intrusive: true + an authorization statement) — ignored"))
     user_selected = profile is not None or bool(list(module)) or full or passive
 
     # Resolve module selection — profiles take precedence.
@@ -454,7 +497,7 @@ def scan(
 
     typer.echo(ui.kv("in-scope", resolved_in))
     typer.echo(ui.kv("out-scope", resolved_out or "(none)"))
-    typer.echo(ui.kv("exec-mode", exec_mode + ("  +intrusive" if (intrusive and exec_mode in ('active', 'full')) else "")))
+    typer.echo(ui.kv("exec-mode", exec_mode + ("  +intrusive" if (intrusive and intrusive_capable(exec_mode)) else "")))
     ai_label = "A — deterministic"
     if agent:
         ai_label = "B+agent — AI triage + agent loop"
@@ -482,12 +525,24 @@ def scan(
     if ai_effective and not api_key:
         typer.echo(ui.warn("ANTHROPIC_API_KEY not set — triage will be skipped"), err=True)
 
-    # Unlock the vulnassess intrusive tier only when authorized in an active/full mode.
-    intrusive_ok = intrusive and exec_mode in ("active", "full")
+    # Unlock the vulnassess intrusive tier only when authorized in the pentest
+    # tier. With an engagement file, the file is the authority (fail-closed):
+    # intrusive runs only if the file authorizes it.
+    intrusive_ok = intrusive and intrusive_capable(exec_mode)
+    if eng is not None:
+        intrusive_ok = intrusive_ok and eng.authorizes_intrusive()
     if intrusive_ok:
         profile_config = {**(profile_config or {}),
                           "vulnassess": {**(profile_config or {}).get("vulnassess", {}),
                                          "intrusive": True, "authorized_intrusive": True}}
+
+    # Engagement banned-tools: drop them from an explicit module selection
+    # (defence-in-depth; a banned tool never loads).
+    if eng and eng.banned_tools and enabled_modules:
+        banned = [m for m in enabled_modules if eng.is_tool_banned(m)]
+        if banned:
+            enabled_modules = [m for m in enabled_modules if not eng.is_tool_banned(m)]
+            typer.echo(ui.warn(f"engagement banned tools removed: {', '.join(banned)}"))
 
     from controller.controller import ScanController
     controller = ScanController(
@@ -529,6 +584,39 @@ def scan(
         raise typer.Exit(code=130)
 
 
+# ── tier subcommands: `recon-ai osint|recon|pentest <domain>` ────────────────────
+# Each is `scan --mode <tier>` with the exact same options (minus --mode), built
+# from scan's own signature so the two can never drift apart.
+
+def _tier_command(tier: str, doc: str):
+    import inspect
+    from typing import get_type_hints
+
+    sig = inspect.signature(scan, eval_str=True)
+    params = [p for name, p in sig.parameters.items() if name != "mode"]
+
+    def command(**kwargs):
+        return scan(mode=tier, **kwargs)
+
+    command.__signature__ = sig.replace(parameters=params)
+    command.__annotations__ = {k: v for k, v in get_type_hints(scan).items() if k != "mode"}
+    command.__doc__ = doc
+    command.__name__ = command.__qualname__ = f"{tier}_scan"
+    return command
+
+
+TIER_COMMANDS = {
+    "osint": "Tier 1 — passive OSINT only. Never sends a packet to the target "
+             "(same as `scan --mode osint`).",
+    "recon": "Tier 2 — OSINT + active enumeration: resolve, probe, port-scan, "
+             "fingerprint, crawl, fuzz. No vulnerability checks (same as `scan --mode recon`).",
+    "pentest": "Tier 3 — recon + evidence-based vulnerability checks; add --intrusive "
+               "for the intrusive tier (same as `scan --mode pentest`).",
+}
+for _tier, _doc in TIER_COMMANDS.items():
+    app.command(name=_tier)(_tier_command(_tier, _doc))
+
+
 # ── modules ───────────────────────────────────────────────────────────────────
 
 @app.command(name="modules")
@@ -550,11 +638,12 @@ def list_modules(
     if not rows:
         typer.echo("No modules found.")
         return
-    typer.echo(f"{'NAME':<20}  {'FLAGS':<36}  DESCRIPTION")
-    typer.echo("-" * 88)
+    typer.echo(f"{'NAME':<20}  {'TIER':<8}  {'FLAGS':<36}  DESCRIPTION")
+    typer.echo("-" * 98)
     for r in rows:
         flags = ", ".join(r["flags"]) or "-"
-        typer.echo(f"{r['name']:<20}  {flags:<36}  {r['description']}")
+        typer.echo(f"{r['name']:<20}  {r['tier'] or '-':<8}  {flags:<36}  {r['description']}")
+    typer.echo("\nTIER = the lowest tier that may run the module (from its capabilities).")
 
 
 # ── triage ────────────────────────────────────────────────────────────────────
@@ -612,49 +701,40 @@ async def _triage(
 def report(
     target: str = typer.Argument(..., help="Scan UUID, or a domain (uses its most recent scan)."),
     db_url: str = typer.Option(..., "--db-url", help="Database URL."),
-    json_out: bool = typer.Option(False, "--json", help="Emit structured JSON instead of text."),
+    json_out: bool = typer.Option(False, "--json", help="Shorthand for --format json."),
+    fmt: str = typer.Option("text", "--format", "-f", help="Output format: text | json | md | html (md/html carry per-finding evidence)."),
     output: str | None = typer.Option(None, "-O", "--output", help="Write to a file instead of stdout."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Render the evidence-based vulnerability report for a scan (text or JSON).
+    """Render the evidence-based vulnerability report for a scan.
 
-    Reads persisted findings — run a scan with --db-url --full first.
+    text (default) · json · md (Markdown with the captured request/response
+    evidence bound to each finding — the shareable deliverable). Reads persisted
+    findings; run a scan with --db-url first, then assess hosts in the pentest
+    section to capture evidence.
     """
     _setup_logging(verbose)
-    asyncio.run(_report(target, db_url, json_out, output))
+    resolved = "json" if json_out else fmt.lower()
+    if resolved not in ("text", "json", "md", "markdown", "html"):
+        typer.echo(f"[error] unknown --format {fmt!r}. Use: text | json | md | html", err=True)
+        raise typer.Exit(code=1)
+    asyncio.run(_report(target, db_url, resolved, output))
 
 
-async def _report(target: str, db_url: str, json_out: bool, output: str | None) -> None:
-    from database.repository import FindingRepository, ScanRepository
-    from database.session import init_db, make_engine, make_session_factory
-    from vulnscan.report import build_report, render_json, render_text, result_from_finding
+async def _report(target: str, db_url: str, fmt: str, output: str | None) -> None:
+    from api.report import build_scan_report, render_report
 
-    engine = make_engine(db_url)
-    await init_db(engine)
-    async with make_session_factory(engine)() as session:
-        scan_repo = ScanRepository(session)
-        scan = None
-        try:
-            scan = await scan_repo.get(uuid.UUID(target))
-            domain = scan.target_domain if scan else target
-        except ValueError:
-            recent = await scan_repo.recent(target, limit=1)
-            scan = recent[0] if recent else None
-            domain = target
-        if scan is None:
-            typer.echo(f"[error] no scan found for {target!r}", err=True)
-            raise typer.Exit(code=1)
+    report, scan = await build_scan_report(db_url, target, with_evidence=True)
+    if report is None:
+        typer.echo(f"[error] no scan found for {target!r}", err=True)
+        raise typer.Exit(code=1)
 
-        findings = await FindingRepository(session).list_for_scan(scan.id)
-
-    results = [r for r in (result_from_finding(f) for f in findings) if r is not None]
-    rep = build_report(domain, results, scan_id=scan.id)
-    text = render_json(rep) if json_out else "\n".join(render_text(rep))
-
+    text = render_report(report, fmt)
+    n = report["summary"]["total"]
     if output:
         with open(output, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-        typer.echo(f"report written → {output}  ({len(results)} finding(s))")
+        typer.echo(f"report written → {output}  ({n} finding(s))")
     else:
         typer.echo(text)
 

@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Crosshair, Activity, Server, Share2, ShieldAlert, Bug,
-  Network, Radio, Workflow, ListChecks, Sparkles, ScrollText, Settings,
+  Network, Radio, Workflow, ListChecks, Sparkles, ScrollText, Settings, ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 
@@ -47,6 +47,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert, keywords: "vulns cve severity" },
       { to: "/findings", label: "Findings & Triage", icon: Bug, keywords: "findings triage report verification" },
+      { to: "/pentest", label: "Pentest", icon: ShieldCheck, keywords: "pentest assess evidence authorization retest" },
       { to: "/exploration", label: "Exploration Graph", icon: Network, keywords: "reasoning graph intents facts" },
     ],
   },

@@ -73,13 +73,22 @@ class VulnAssessModule(BaseModule):
         self._state.observe(event)
 
     async def _probe(self, url: str):
-        """Shared-limiter, cached GET used by active checks (header/reflection)."""
-        return await self.fetch(
+        """Shared-limiter, cached GET used by active checks (header/reflection).
+
+        Routed through `fetch_evidence` so each probe is captured into the
+        evidence store when an evidence key is configured (a no-op otherwise, so
+        the default assessment is unchanged). The returned FetchResult is what the
+        checks consume; the captured exchange id is not linked to a finding here
+        (unlinked proof keyed by scan/host/url) — finding-linking lands when the
+        checks become capture-backed tools in the pentest section."""
+        result, _ = await self.fetch_evidence(
             url,
+            source_tool=self.name,
             timeout=int(self.opt("timeout")),
             max_body_kb=int(self.opt("max_body_kb")),
             follow_redirects=True,
         )
+        return result
 
     async def finish(self) -> None:
         active = bool(self.opt("active_checks"))

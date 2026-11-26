@@ -30,7 +30,7 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
   const { data: catalog } = useQuery({ queryKey: ["catalog"], queryFn: getCatalog, staleTime: 60_000 });
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: 60_000 });
   const [domain, setDomain] = useState("");
-  const [mode, setMode] = useState("active");
+  const [mode, setMode] = useState("pentest");
   const [inScope, setInScope] = useState("");
   const [outScope, setOutScope] = useState("");
   const [maxDistance, setMaxDistance] = useState("5");
@@ -106,7 +106,7 @@ function NewScanForm({ onClose }: { onClose: () => void }) {
             </Field>
             <Field label="Mode">
               <Select value={mode} onChange={(e) => setMode(e.target.value)}>
-                {(catalog?.modes ?? ["osint", "vuln", "active", "full"]).map((m) => (
+                {(catalog?.modes ?? ["osint", "recon", "pentest"]).map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </Select>

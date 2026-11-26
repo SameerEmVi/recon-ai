@@ -218,13 +218,16 @@ async def start_scan(
     rate_limit      Max requests/sec per bucket. None = unlimited (adaptive WAF
                     backoff still applies if the target starts blocking).
     max_concurrency Max simultaneous recon operations. None = unlimited.
-    mode            Execution mode / capability ceiling, enforced centrally:
+    mode            Execution tier / capability ceiling, enforced centrally
+                    (each tier includes the one before):
                     "osint" (DEFAULT — passive only, no target probing; safe for
-                    an unattended external caller), "vuln" (minimal discovery +
-                    vulnerability assessment), "active" (full active recon +
-                    non-intrusive checks), "full". Callers that want the target
-                    actively probed must opt in by passing an explicit mode. The
-                    mode cannot be exceeded by any module or agent action.
+                    an unattended external caller), "recon" (+ active discovery:
+                    resolve, probe, port-scan, crawl, fuzz), "pentest" (+ non-
+                    intrusive vulnerability checks). Legacy "active"/"full" mean
+                    "pentest"; legacy "vuln" keeps its narrow ceiling (deprecated).
+                    Callers that want the target actively probed must opt in by
+                    passing an explicit tier. The tier cannot be exceeded by any
+                    module or agent action.
 
     IMPORTANT: Only scan domains you are explicitly authorized to test.
     """

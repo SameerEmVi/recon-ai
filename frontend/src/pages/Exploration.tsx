@@ -1,390 +1,759 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import cytoscape from "cytoscape";
-import type { Core, ElementDefinition } from "cytoscape";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  Pause, Play, Square, RefreshCw, Target, Compass, ChevronRight, Check, X, Ban, ArrowUp,
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Panel,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+} from "@xyflow/react";
+import type { Edge, Node, NodeProps } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import {
+  Bug,
+  ChevronDown,
+  ChevronRight,
+  Compass,
+  Copy,
+  Flag,
+  FlaskConical,
+  Lock,
+  ShieldCheck,
+  Target,
+  X,
 } from "lucide-react";
-import {
-  listExplorations, getEngineGraph, getEngGoals, getEngActivities, getEngNode,
-  engPause, engResume, engStop, engReplan, engApproveIntent, engRejectIntent,
-  engCancelIntent, engBlockGoal, engPrioritizeGoal,
-  type EngGoal, type EngNode, type EngNodeKind,
-} from "@/lib/api";
+import type { LucideIcon } from "lucide-react";
+import { listScans, getExploration } from "@/lib/api";
+import type { ExploreEdge, ExploreKind, ExploreNode, ExploreRel, ScanStatus } from "@/lib/api";
+import { CARD_W, layoutExploration } from "@/lib/explorationLayout";
 import { Select } from "@/components/ui/field";
-import { StatusIndicator } from "@/components/common/StatusIndicator";
-import { EmptyState } from "@/components/common/states";
-import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/cn";
 
-// Node palette + status overrides.
-const KIND_COLOR: Record<EngNodeKind, string> = {
-  objective: "#a78bfa", goal: "#38bdf8", intent: "#818cf8", fact: "#94a3b8",
-  hint: "#f59e0b", finding: "#ef4444", digest: "#64748b",
+// ── visual vocabulary ─────────────────────────────────────────────────────────
+
+type KindMeta = { label: string; icon: LucideIcon; tile: string; hex: string };
+const KIND: Record<ExploreKind, KindMeta> = {
+  start: { label: "Start", icon: Flag, tile: "bg-slate-500", hex: "#64748b" },
+  scope: { label: "Scope", icon: ShieldCheck, tile: "bg-violet-500", hex: "#8b5cf6" },
+  goal: { label: "Goal", icon: Target, tile: "bg-emerald-500", hex: "#10b981" },
+  intent: { label: "Intent", icon: Compass, tile: "bg-blue-500", hex: "#3b82f6" },
+  fact: { label: "Fact", icon: FlaskConical, tile: "bg-amber-500", hex: "#f59e0b" },
+  vulnerability: { label: "Vulnerability", icon: Bug, tile: "bg-rose-500", hex: "#f43f5e" },
 };
-const GOAL_STATE: Record<string, string> = {
-  satisfied: "#22c55e", partial: "#f59e0b", blocked: "#ef4444", failed: "#ef4444",
-  active: "#38bdf8", open: "#64748b", cancelled: "#475569",
+const LEGEND_KINDS: ExploreKind[] = ["start", "scope", "goal", "intent", "fact", "vulnerability"];
+
+const REL: Record<ExploreRel, { label: string; color: string; dashed?: boolean }> = {
+  spawns: { label: "spawns", color: "#10b981" },
+  next: { label: "then", color: "#6366f1" },
+  constrains: { label: "scope", color: "#8b5cf6", dashed: true },
+  yields: { label: "yields", color: "#f59e0b" },
+  proves: { label: "proves", color: "#f43f5e" },
+  "intent-chain": { label: "data flow", color: "#38bdf8", dashed: true },
 };
-const INTENT_STATE: Record<string, string> = {
-  completed: "#22c55e", running: "#38bdf8", failed: "#ef4444", rejected: "#ef4444",
-  blocked: "#f59e0b", queued: "#818cf8", open: "#64748b", cancelled: "#475569",
+
+type Tone = "slate" | "sky" | "indigo" | "emerald" | "amber" | "rose";
+const TONE: Record<Tone, string> = {
+  slate: "bg-slate-500/15 text-slate-300 ring-slate-500/30",
+  sky: "bg-sky-500/15 text-sky-300 ring-sky-500/40",
+  indigo: "bg-indigo-500/15 text-indigo-300 ring-indigo-500/30",
+  emerald: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
+  amber: "bg-amber-500/15 text-amber-300 ring-amber-500/30",
+  rose: "bg-rose-500/15 text-rose-300 ring-rose-500/30",
 };
-function nodeColor(n: EngNode): string {
-  if (n.kind === "goal") return GOAL_STATE[n.state ?? ""] ?? KIND_COLOR.goal;
-  if (n.kind === "intent") return INTENT_STATE[n.state ?? ""] ?? KIND_COLOR.intent;
-  return KIND_COLOR[n.kind] ?? "#64748b";
+
+const GOAL_STATE: Record<string, { label: string; tone: Tone; hint: string }> = {
+  locked: { label: "Locked", tone: "slate", hint: "This tier is not allowed by the scan's mode" },
+  pending: { label: "Pending", tone: "slate", hint: "No tool for this goal has started yet" },
+  running: { label: "In progress", tone: "sky", hint: "Tools for this goal produced output in the last 90 s" },
+  waiting: { label: "Quiet", tone: "indigo", hint: "Started; no new output in the last 90 s" },
+  achieved: { label: "Achieved", tone: "emerald", hint: "Scan finished and this goal's tools ran" },
+  incomplete: { label: "Incomplete", tone: "amber", hint: "Scan finished but some tools failed" },
+  skipped: { label: "Skipped", tone: "slate", hint: "Scan finished without any tool for this goal running" },
+};
+const INTENT_STATE: Record<string, { label: string; tone: Tone; hint: string }> = {
+  pending: { label: "Queued", tone: "slate", hint: "Loaded for this scan, waiting for its input events" },
+  running: { label: "Running", tone: "sky", hint: "Produced output in the last 90 s" },
+  waiting: { label: "Quiet", tone: "indigo", hint: "No new output in the last 90 s; may still be working" },
+  done: { label: "Done", tone: "emerald", hint: "Scan finished" },
+  failed: { label: "Failed", tone: "rose", hint: "At least one run of this tool failed" },
+  skipped: { label: "Not triggered", tone: "slate", hint: "Its input never appeared" },
+};
+const VERIFY_TONE: Record<string, Tone> = {
+  CONFIRMED: "rose",
+  POTENTIAL: "amber",
+  UNCONFIRMED: "slate",
+  OBSERVED: "slate",
+};
+const SEV_TONE: Record<string, Tone> = {
+  critical: "rose",
+  high: "rose",
+  medium: "amber",
+  low: "sky",
+  info: "slate",
+};
+const TIER_LABEL: Record<string, string> = { osint: "Recon (OSINT)", recon: "Enumeration", pentest: "Web app pentest" };
+
+const prioTone = (p: number): Tone => (p >= 8 ? "rose" : p >= 5 ? "amber" : "slate");
+const isLive = (n: ExploreNode) => n.state === "running";
+
+function Pill({ tone, children, title, pulse }: { tone: Tone; children: ReactNode; title?: string; pulse?: boolean }) {
+  return (
+    <span
+      title={title}
+      className={cn("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset", TONE[tone])}
+    >
+      {pulse !== undefined && (
+        <span className={cn("h-1.5 w-1.5 rounded-full bg-current", pulse && "animate-pulse")} />
+      )}
+      {children}
+    </span>
+  );
 }
 
-const cyStyle: cytoscape.Stylesheet[] = [
-  {
-    selector: "node",
-    style: {
-      "background-color": (el) => nodeColor(el.data() as EngNode),
-      label: "data(label)", color: "#cbd5e1", "font-size": 8,
-      "font-family": "\"JetBrains Mono\", ui-monospace, monospace",
-      "text-valign": "center", "text-halign": "right", "text-margin-x": 5,
-      "min-zoomed-font-size": 6, width: 14, height: 14,
-    },
-  },
-  { selector: 'node[kind = "objective"]', style: { width: 30, height: 30, shape: "round-rectangle", "font-size": 12 } },
-  { selector: 'node[kind = "goal"]', style: { width: 22, height: 22, shape: "round-rectangle", "font-size": 10 } },
-  { selector: 'node[kind = "intent"]', style: { width: 16, height: 16, shape: "hexagon" } },
-  { selector: 'node[kind = "fact"]', style: { shape: "diamond", width: 12, height: 12 } },
-  { selector: 'node[kind = "finding"]', style: { shape: "triangle", width: 16, height: 16 } },
-  { selector: 'node[kind = "digest"]', style: { shape: "round-rectangle", width: 18, height: 12, opacity: 0.6 } },
-  {
-    selector: "edge",
-    style: {
-      width: 1.2, "line-color": "#334155", "target-arrow-color": "#334155",
-      "target-arrow-shape": "triangle", "arrow-scale": 0.7, "curve-style": "bezier", opacity: 0.55,
-    },
-  },
-  { selector: "node:selected", style: { "border-width": 3, "border-color": "#38bdf8" } },
-  { selector: ".faded", style: { opacity: 0.1 } },
-];
+function statePill(n: ExploreNode) {
+  if (n.kind === "goal" || n.kind === "intent") {
+    const table = n.kind === "goal" ? GOAL_STATE : INTENT_STATE;
+    const s = table[n.state ?? ""] ?? { label: n.state ?? "—", tone: "slate" as Tone, hint: "" };
+    return (
+      <Pill tone={s.tone} title={s.hint} pulse={isLive(n)}>
+        {n.state === "locked" && <Lock className="h-2.5 w-2.5" />}
+        {s.label}
+      </Pill>
+    );
+  }
+  if (n.kind === "vulnerability") {
+    return n.verification ? (
+      <Pill tone={VERIFY_TONE[n.verification] ?? "slate"} title="Verification status (set by deterministic checks)">
+        {n.verification.toLowerCase()}
+      </Pill>
+    ) : (
+      <Pill tone={SEV_TONE[n.severity ?? ""] ?? "slate"}>{n.severity ?? "finding"}</Pill>
+    );
+  }
+  if (n.kind === "fact" && n.etype) {
+    return <span className="font-mono text-[10px] text-muted-foreground">{n.etype.toLowerCase()}</span>;
+  }
+  return <span className="text-[10px] text-muted-foreground">{KIND[n.kind].label}</span>;
+}
 
-export default function Exploration() {
-  const qc = useQueryClient();
-  const toast = useToast();
-  const { data: explResp } = useQuery({ queryKey: ["explorations"], queryFn: listExplorations, refetchInterval: 6_000 });
-  const explorations = explResp?.explorations ?? [];
-  const [eid, setEid] = useState<string>("");
-  useEffect(() => {
-    if (eid || !explorations.length) return;
-    const running = explorations.find((e) => e.status === "running");
-    setEid((running ?? explorations[0]).id);
-  }, [explorations, eid]);
+// ── node card ─────────────────────────────────────────────────────────────────
 
-  const { data: graph } = useQuery({
-    queryKey: ["eng-graph", eid], queryFn: () => getEngineGraph(undefined, eid || undefined),
-    enabled: !!eid, refetchInterval: 4_000,
-  });
-  const { data: goalsResp } = useQuery({
-    queryKey: ["eng-goals", eid], queryFn: () => getEngGoals(undefined, eid || undefined),
-    enabled: !!eid, refetchInterval: 5_000,
-  });
-  const { data: acts } = useQuery({
-    queryKey: ["eng-activities", eid], queryFn: () => getEngActivities(undefined, eid || undefined),
-    enabled: !!eid, refetchInterval: 4_000,
-  });
+type CardData = {
+  node: ExploreNode;
+  displayId: string;
+  hidden?: number;
+  collapsed?: boolean;
+  onToggle?: (goalId: string) => void;
+};
+type CardNode = Node<CardData, "card">;
 
-  const run = graph?.run ?? goalsResp?.run ?? null;
-  const goals = goalsResp?.goals ?? [];
+const handleCls = "!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent";
 
-  const [selId, setSelId] = useState<string | null>(null);
-  const { data: nodeDetail } = useQuery({
-    queryKey: ["eng-node", eid, selId],
-    queryFn: () => getEngNode(selId!, undefined, eid || undefined),
-    enabled: !!selId && !!eid && !selId.startsWith("digest:"),
-  });
+const ExploreCard = memo(function ExploreCard({ data, selected }: NodeProps<CardNode>) {
+  const n = data.node;
+  const meta = KIND[n.kind];
+  const Icon = meta.icon;
+  const locked = n.kind === "goal" && n.state === "locked";
+  const live = isLive(n);
+  const showPrio = (n.kind === "goal" || n.kind === "intent") && (n.priority ?? 0) > 0;
 
-  const invalidate = () => {
-    for (const k of ["eng-graph", "eng-goals", "eng-activities", "eng-node"]) qc.invalidateQueries({ queryKey: [k] });
-  };
-
-  // ── graph ─────────────────────────────────────────────────────────────────
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const cyRef = useRef<Core | null>(null);
-  useEffect(() => {
-    if (!containerRef.current || cyRef.current) return;
-    const cy = cytoscape({ container: containerRef.current, style: cyStyle, minZoom: 0.1, maxZoom: 3, wheelSensitivity: 0.2 });
-    cy.on("tap", "node", (ev) => {
-      setSelId(ev.target.id());
-      cy.elements().addClass("faded");
-      ev.target.closedNeighborhood().removeClass("faded");
-    });
-    cy.on("tap", (ev) => { if (ev.target === cy) { setSelId(null); cy.elements().removeClass("faded"); } });
-    cyRef.current = cy;
-    return () => { cy.destroy(); cyRef.current = null; };
-  }, []);
-  useEffect(() => {
-    const cy = cyRef.current;
-    if (!cy || !graph) return;
-    const els: ElementDefinition[] = [
-      ...graph.nodes.map((n) => ({ group: "nodes" as const, data: { ...n } })),
-      ...graph.edges.filter((e) => graph.nodes.some((n) => n.id === e.source) && graph.nodes.some((n) => n.id === e.target))
-        .map((e) => ({ group: "edges" as const, data: { id: e.id, source: e.source, target: e.target } })),
-    ];
-    cy.batch(() => { cy.elements().remove(); cy.add(els); });
-    cy.resize();
-    const root = graph.nodes.find((n) => n.kind === "objective")?.id;
-    try {
-      cy.layout({ name: "breadthfirst", directed: true, ...(root ? { roots: [root] } : {}),
-        spacingFactor: 1.1, animate: false, fit: true, padding: 28 } as cytoscape.LayoutOptions).run();
-    } catch { /* ignore */ }
-  }, [graph]);
-
-  const zoomBy = (f: number) => { const cy = cyRef.current; if (cy) cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); };
-
-  // ── controls ───────────────────────────────────────────────────────────────
-  const ctl = useMutation({
-    mutationFn: async (fn: () => Promise<unknown>) => fn(),
-    onSuccess: () => { invalidate(); toast.success("Exploration updated"); },
-    onError: () => toast.error("Action failed"),
-  });
-  const act = (label: string, fn: () => Promise<unknown>) => ctl.mutate(fn, { onSuccess: () => { invalidate(); toast.success(label); } });
-
-  const streaming = run?.status === "running";
-  const noEngine = explorations.length === 0 || (!!eid && graph && graph.nodes.length === 0 && goals.length === 0);
+  let title = n.label;
+  let body = n.summary ?? "";
+  if (n.kind === "goal") {
+    title = `${n.step}. ${n.label}`;
+    body = locked
+      ? n.reason ?? "Not allowed in this mode"
+      : `${n.intents ?? 0} intent${n.intents === 1 ? "" : "s"} · ${n.events ?? 0} events`;
+  } else if (n.kind === "start") {
+    body = n.summary ?? "";
+  }
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col gap-3">
-      {/* Toolbar */}
+    <div
+      style={{ width: CARD_W }}
+      className={cn(
+        "group rounded-xl border-2 transition-colors",
+        selected ? "border-sky-400" : live ? "border-sky-500/50" : "border-transparent",
+      )}
+    >
+      <div
+        className={cn(
+          "relative rounded-[10px] border border-border bg-card shadow-md shadow-black/30 transition-shadow group-hover:shadow-lg group-hover:shadow-black/50",
+          locked && "opacity-55",
+        )}
+      >
+        <Handle id="in" type="target" position={Position.Left} className={handleCls} />
+        <Handle id="out" type="source" position={Position.Right} className={handleCls} />
+        {n.kind === "goal" && (
+          <>
+            <Handle id="next-in" type="target" position={Position.Top} className={handleCls} />
+            <Handle id="next-out" type="source" position={Position.Bottom} className={handleCls} />
+          </>
+        )}
+
+        <div className="flex items-center gap-2 px-3 pb-1 pt-2.5">
+          <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-md shadow-sm", meta.tile)}>
+            <Icon className="h-3 w-3 text-white" />
+          </span>
+          <span className="grow truncate text-[12px] font-semibold text-foreground/90">{meta.label}</span>
+          {live && (
+            <span className="relative flex h-2 w-2 shrink-0" aria-label="live">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-70" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-500" />
+            </span>
+          )}
+          {showPrio && (
+            <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ring-1 ring-inset", TONE[prioTone(n.priority!)])}>
+              P{n.priority}
+            </span>
+          )}
+          {n.kind === "goal" && data.onToggle && !locked && (
+            <button
+              type="button"
+              title={data.collapsed ? "Expand this goal" : "Collapse this goal"}
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onToggle?.(n.id);
+              }}
+              className="nodrag -mr-1 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              {data.collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
+          )}
+        </div>
+
+        <div className="px-3 pb-2">
+          <div className="truncate text-[13px] font-medium text-foreground" title={title}>
+            {title}
+          </div>
+          {body && <div className="mt-0.5 line-clamp-2 break-words text-[11.5px] leading-snug text-muted-foreground">{body}</div>}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            {statePill(n)}
+            {data.collapsed && (data.hidden ?? 0) > 0 && (
+              <span className="text-[10px] text-muted-foreground">+{data.hidden} hidden</span>
+            )}
+          </div>
+          <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">{data.displayId}</span>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const nodeTypes = { card: ExploreCard };
+
+// ── edges ─────────────────────────────────────────────────────────────────────
+
+function toEdge(e: ExploreEdge, liveTargets: Set<string>): Edge {
+  const rel = REL[e.rel] ?? { label: e.rel, color: "#64748b" };
+  const isNext = e.rel === "next";
+  const animated = liveTargets.has(e.target) && (e.rel === "spawns" || e.rel === "intent-chain");
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: isNext ? "next-out" : "out",
+    targetHandle: isNext ? "next-in" : "in",
+    type: "default",
+    animated,
+    label: e.rel === "intent-chain" ? undefined : rel.label,
+    labelShowBg: false,
+    labelStyle: { fontSize: 10, fontWeight: 600, fill: rel.color },
+    style: {
+      stroke: rel.color,
+      strokeWidth: isNext ? 2.5 : e.rel === "intent-chain" ? 1.2 : 1.8,
+      strokeOpacity: animated ? 0.95 : e.rel === "intent-chain" ? 0.45 : 0.6,
+      strokeDasharray: rel.dashed ? "5 4" : undefined,
+    },
+    markerEnd: { type: MarkerType.ArrowClosed, color: rel.color, width: 14, height: 14 },
+    zIndex: isNext ? 1 : 0,
+  };
+}
+
+// ── page ──────────────────────────────────────────────────────────────────────
+
+export default function Exploration() {
+  return (
+    <ReactFlowProvider>
+      <ExplorationView />
+    </ReactFlowProvider>
+  );
+}
+
+function ExplorationView() {
+  const { data: scans } = useQuery({ queryKey: ["scans"], queryFn: listScans, refetchInterval: 5_000 });
+  const [scanId, setScanId] = useState<string>("");
+
+  useEffect(() => {
+    if (scanId || !scans?.length) return;
+    const running = scans.find((s) => s.status === "running");
+    setScanId((running ?? scans[0]).scan_id);
+  }, [scans, scanId]);
+
+  // Always enabled: with no scan picked the backend falls back to the most
+  // recent scan in the DB, so CLI-launched and past scans are viewable too.
+  const { data } = useQuery({
+    queryKey: ["exploration", scanId],
+    queryFn: () => getExploration(scanId || undefined),
+    refetchInterval: 4_000, // live: the plan fills in as the scan runs
+  });
+  const shownScanId = scanId || data?.scan?.scan_id || "";
+
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [showFlow, setShowFlow] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<CardNode>([]);
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const { fitView, setViewport } = useReactFlow();
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const layoutSig = useRef("");
+  const fittedFor = useRef("");
+
+  const toggleGoal = useCallback((goalId: string) => {
+    setCollapsed((cur) => {
+      const next = new Set(cur);
+      if (next.has(goalId)) next.delete(goalId);
+      else next.add(goalId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    setCollapsed(new Set());
+    setSelectedId(null);
+    layoutSig.current = "";
+  }, [shownScanId]);
+
+  const nodes = useMemo(() => data?.nodes ?? [], [data]);
+  const edges = useMemo(() => data?.edges ?? [], [data]);
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const laid = useMemo(() => layoutExploration(nodes, edges, collapsed), [nodes, edges, collapsed]);
+
+  // Re-lay out only when the structure changes; a pure data refresh keeps any
+  // positions the operator dragged.
+  useEffect(() => {
+    const sig = [...laid.visible].sort().join("|");
+    const relayout = sig !== layoutSig.current;
+    layoutSig.current = sig;
+    setRfNodes((prev) => {
+      const prevPos = new Map(prev.map((p) => [p.id, p.position]));
+      return nodes
+        .filter((n) => laid.visible.has(n.id))
+        .map((n) => ({
+          id: n.id,
+          type: "card" as const,
+          position: (!relayout && prevPos.get(n.id)) || laid.positions.get(n.id) || { x: 0, y: 0 },
+          data: {
+            node: n,
+            displayId: laid.displayId.get(n.id) ?? "",
+            hidden: laid.hiddenCount.get(n.id),
+            collapsed: collapsed.has(n.id),
+            onToggle: toggleGoal,
+          },
+          selected: n.id === selectedId,
+        }));
+    });
+    const live = new Set(nodes.filter(isLive).map((n) => n.id));
+    setRfEdges(
+      edges
+        .filter((e) => laid.visible.has(e.source) && laid.visible.has(e.target))
+        .filter((e) => showFlow || e.rel !== "intent-chain")
+        .map((e) => toEdge(e, live)),
+    );
+  }, [nodes, edges, laid, collapsed, showFlow, selectedId, toggleGoal, setRfNodes, setRfEdges]);
+
+  // Open each scan at the top-left of the plan at a readable zoom: fit the width
+  // (capped at 100%) and let the operator scroll down, rather than shrinking a
+  // tall plan until the cards are unreadable.
+  const showTop = useCallback(
+    (duration = 300) => {
+      const el = canvasRef.current;
+      if (!el || laid.positions.size === 0) return;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity;
+      for (const id of laid.visible) {
+        const p = laid.positions.get(id);
+        if (!p) continue;
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x + CARD_W);
+      }
+      const pad = 32;
+      const zoom = Math.max(0.45, Math.min(1, (el.clientWidth - pad * 2) / (maxX - minX)));
+      void setViewport({ x: pad - minX * zoom, y: pad + 96 - minY * zoom, zoom }, { duration });
+    },
+    [laid, setViewport],
+  );
+  useEffect(() => {
+    if (!shownScanId || rfNodes.length < 3 || fittedFor.current === shownScanId) return;
+    fittedFor.current = shownScanId;
+    requestAnimationFrame(() => showTop(0));
+  }, [shownScanId, rfNodes.length, showTop]);
+
+  const goals = useMemo(
+    () => nodes.filter((n) => n.kind === "goal").sort((a, b) => (a.step ?? 0) - (b.step ?? 0)),
+    [nodes],
+  );
+
+  const focusGoal = (goalId: string) => {
+    if (collapsed.has(goalId)) toggleGoal(goalId);
+    const ids = new Set([goalId]);
+    for (const e of edges) if (e.source === goalId && e.rel !== "next" && e.rel !== "constrains") ids.add(e.target);
+    requestAnimationFrame(() =>
+      fitView({ nodes: [...ids].map((id) => ({ id })), padding: 0.25, duration: 450, maxZoom: 1.1 }),
+    );
+    setSelectedId(goalId);
+  };
+
+  const summary = data?.summary;
+  const streaming = (data?.scan?.status ?? "") === "running";
+  const selected = selectedId ? byId.get(selectedId) ?? null : null;
+  const empty = !data?.scan || nodes.length <= 2;
+  // The selector lists console scans, plus the DB scan being shown if it isn't one.
+  const scanOptions = [...(scans ?? [])];
+  if (data?.scan && !scanOptions.some((s) => s.scan_id === data.scan!.scan_id)) {
+    scanOptions.push({ ...data.scan, status: data.scan.status as ScanStatus["status"], event_count: 0 });
+  }
+
+  return (
+    <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
+        <div>
           <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             Exploration
-            {streaming && <span className="pulse-ring inline-block h-2 w-2 rounded-full bg-success" />}
+            {streaming && <span className="pulse-ring inline-block h-2 w-2 rounded-full bg-success" aria-label="live" />}
           </h1>
-          <p className="truncate text-xs text-muted-foreground">
-            {run ? <>Objective: <span className="text-foreground">{run.title}</span> · {run.target} · <span className="capitalize">{run.status}</span></>
-              : "Goal-driven autonomous exploration"}
-            {graph?.summary && <> · {graph.summary.goals} goals · {graph.summary.intents} intents · {graph.summary.facts} facts</>}
+          <p className="text-xs text-muted-foreground">
+            The scan's plan, left to right: goals → intents → facts → vulnerabilities
+            {summary
+              ? ` · ${summary.goals_achieved}/${summary.goals} goals achieved · ${summary.intents} intents · ${summary.facts} facts · ${summary.vulnerabilities} vulns`
+              : ""}
+            {data?.scan ? ` · ${data.scan.domain} (${data.scan.mode})` : ""}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {run && (
-            <div className="flex items-center gap-1 rounded-md border border-border bg-card p-0.5">
-              {run.status === "paused"
-                ? <TBtn icon={Play} label="Resume" onClick={() => act("Resumed", () => engResume(run.id))} />
-                : <TBtn icon={Pause} label="Pause" onClick={() => act("Paused", () => engPause(run.id))} />}
-              <TBtn icon={RefreshCw} label="Replan" onClick={() => act("Replan requested", () => engReplan(run.id))} />
-              <TBtn icon={Square} label="Stop" danger onClick={() => act("Stopped", () => engStop(run.id))} />
-            </div>
-          )}
-          <Select value={eid} onChange={(e) => setEid(e.target.value)} className="w-64">
-            <option value="">Select an exploration…</option>
-            {explorations.map((e) => <option key={e.id} value={e.id}>{e.target} · {e.status}</option>)}
+          <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground">
+            <input type="checkbox" checked={showFlow} onChange={(e) => setShowFlow(e.target.checked)} className="accent-sky-500" />
+            Data flow
+          </label>
+          <button
+            type="button"
+            onClick={() => showTop()}
+            className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            Top
+          </button>
+          <button
+            type="button"
+            onClick={() => void fitView({ padding: 0.1, duration: 400 })}
+            className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            Whole plan
+          </button>
+          <button
+            type="button"
+            onClick={() => setCollapsed(collapsed.size ? new Set() : new Set(goals.map((g) => g.id)))}
+            className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            {collapsed.size ? "Expand all" : "Collapse all"}
+          </button>
+          <Select value={shownScanId} onChange={(e) => setScanId(e.target.value)} className="w-64">
+            <option value="">Latest scan</option>
+            {scanOptions.map((s) => (
+              <option key={s.scan_id} value={s.scan_id}>
+                {s.domain} · {s.status}
+              </option>
+            ))}
           </Select>
         </div>
       </div>
 
-      {noEngine ? (
-        <EmptyState icon={Target} title="No exploration for this scan yet"
-          description="The autonomous engine creates an objective, decomposes goals, plans intents and records facts as it runs." />
-      ) : (
-        <div className="flex min-h-0 flex-1 gap-3">
-          {/* Left — goal tree */}
-          <aside className="hidden w-60 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card lg:flex">
-            <div className="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
-              Goal tree
-            </div>
-            <div className="flex-1 overflow-y-auto p-1">
-              <GoalTree goals={goals} selId={selId} onSelect={setSelId} />
-              {goals.length === 0 && <p className="px-2 py-4 text-center text-xs text-muted-foreground">No goals yet.</p>}
-            </div>
-          </aside>
+      {goals.length > 0 && <GoalStepper goals={goals} activeId={selectedId} onPick={focusGoal} />}
 
-          {/* Centre — graph + timeline */}
-          <div className="flex min-w-0 flex-1 flex-col gap-3">
-            <div className="relative min-h-0 flex-1">
-              <div ref={containerRef} className="h-full w-full rounded-lg border border-border bg-panel" />
-              <div className="absolute bottom-3 left-3 flex flex-col gap-1 rounded-md border border-border bg-background/80 p-1 backdrop-blur">
-                <button onClick={() => zoomBy(1.3)} className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground">+</button>
-                <button onClick={() => zoomBy(0.75)} className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground">−</button>
-                <button onClick={() => cyRef.current?.fit(undefined, 40)} title="Fit" className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"><Target className="h-3.5 w-3.5" /></button>
-              </div>
-              {/* Legend */}
-              <div className="absolute left-3 top-3 flex animate-fade-in flex-wrap gap-x-3 gap-y-1 rounded-md border border-border bg-background/80 p-2 text-[10px] backdrop-blur">
-                {(["objective", "goal", "intent", "fact", "finding"] as EngNodeKind[]).map((k) => (
-                  <span key={k} className="flex items-center gap-1 text-muted-foreground">
-                    <span className="h-2 w-2 rounded-full" style={{ background: KIND_COLOR[k] }} />{k}
-                  </span>
-                ))}
-              </div>
-            </div>
-            {/* Activity timeline */}
-            <div className="h-36 shrink-0 overflow-hidden rounded-lg border border-border bg-card">
-              <div className="border-b border-border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">Activity timeline</div>
-              <div className="h-[calc(100%-1.75rem)] space-y-0.5 overflow-y-auto p-2">
-                {(acts?.activities ?? []).length === 0 ? (
-                  <p className="px-1 py-3 text-center text-xs text-muted-foreground">No activity yet.</p>
-                ) : (acts!.activities.map((a) => (
-                  <div key={a.id} className="flex items-center gap-2 rounded px-1.5 py-1 text-[11px] hover:bg-accent/40">
-                    <span className="shrink-0 font-mono text-muted-foreground/60">{(a.timestamp ?? "").slice(11, 19)}</span>
-                    <span className="shrink-0 rounded border border-border/60 px-1 font-mono text-[9px] text-muted-foreground">{a.activity_type}</span>
-                    <span className="truncate text-muted-foreground">{a.summary}</span>
-                    <span className="ml-auto shrink-0 text-muted-foreground/50">{a.worker}</span>
-                  </div>
-                )))}
-              </div>
-            </div>
+      <div ref={canvasRef} className="relative h-[72vh] w-full overflow-hidden rounded-xl border border-border">
+        <ReactFlow
+          nodes={rfNodes}
+          edges={rfEdges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={(_, node) => setSelectedId(node.id)}
+          onPaneClick={() => setSelectedId(null)}
+          nodeTypes={nodeTypes}
+          nodesConnectable={false}
+          panOnScroll
+          zoomOnPinch
+          colorMode="dark"
+          minZoom={0.08}
+          maxZoom={1.75}
+          proOptions={{ hideAttribution: true }}
+          onlyRenderVisibleElements
+          className="!bg-background"
+        >
+          <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="hsl(222 14% 22%)" />
+          <Controls showInteractive={false} className="!overflow-hidden !rounded-lg !border !border-border !shadow-md" />
+          <MiniMap
+            pannable
+            zoomable
+            className="!rounded-lg !border !border-border !bg-card"
+            maskColor="rgb(2 6 23 / 0.55)"
+            nodeColor={(node) => KIND[(node.data as CardData | undefined)?.node.kind ?? "intent"].hex}
+            nodeStrokeWidth={0}
+            nodeBorderRadius={4}
+          />
+          <Panel position="top-left">
+            <Legend />
+          </Panel>
+        </ReactFlow>
+
+        {empty && (
+          <div className="pointer-events-none absolute inset-0 flex animate-fade-in items-center justify-center">
+            <p className="text-sm text-muted-foreground">
+              {!data?.scan ? "No scans recorded yet. Run a scan to see its plan." : "No exploration recorded yet for this scan."}
+            </p>
           </div>
+        )}
 
-          {/* Right — inspector */}
-          <aside className="hidden w-80 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card xl:flex">
-            {!selId ? (
-              <EmptyState icon={Compass} title="No node selected" description="Click a node in the graph or a goal in the tree." />
-            ) : (
-              <Inspector detail={nodeDetail} run={run} onAction={act} />
-            )}
-          </aside>
-        </div>
-      )}
+        {selected && (
+          <DetailPanel
+            node={selected}
+            displayId={laid.displayId.get(selected.id) ?? ""}
+            byId={byId}
+            onSelect={setSelectedId}
+            onClose={() => setSelectedId(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
-function TBtn({ icon: Icon, label, onClick, danger }: { icon: typeof Target; label: string; onClick: () => void; danger?: boolean }) {
+// ── goal stepper: the goals in processing order ───────────────────────────────
+
+function GoalStepper({ goals, activeId, onPick }: { goals: ExploreNode[]; activeId: string | null; onPick: (id: string) => void }) {
   return (
-    <button onClick={onClick} title={label}
-      className={cn("flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors hover:bg-accent",
-        danger ? "text-critical hover:text-critical" : "text-muted-foreground hover:text-foreground")}>
-      <Icon className="h-3.5 w-3.5" /> <span className="hidden sm:inline">{label}</span>
-    </button>
-  );
-}
-
-// ── goal tree (nested) ────────────────────────────────────────────────────────
-function GoalTree({ goals, selId, onSelect }: { goals: EngGoal[]; selId: string | null; onSelect: (id: string) => void }) {
-  const children = useMemo(() => {
-    const m = new Map<string | null, EngGoal[]>();
-    for (const g of goals) {
-      const k = g.parent_goal_id;
-      (m.get(k) ?? m.set(k, []).get(k)!).push(g);
-    }
-    return m;
-  }, [goals]);
-
-  const render = (parent: string | null, depth: number): React.ReactNode =>
-    (children.get(parent) ?? []).map((g) => (
-      <div key={g.id}>
-        <button onClick={() => onSelect(g.id)}
-          style={{ paddingLeft: 8 + depth * 14 }}
-          className={cn("flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent/50",
-            selId === g.id && "bg-accent/60")}>
-          {depth > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />}
-          <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: GOAL_STATE[g.state] ?? "#64748b" }} />
-          <span className="truncate text-foreground">{g.title}</span>
-          <span className="ml-auto shrink-0 font-mono text-[9px] text-muted-foreground/60">P{g.priority}</span>
-        </button>
-        {render(g.id, depth + 1)}
-      </div>
-    ));
-
-  return <>{render(null, 0)}</>;
-}
-
-// ── inspector ─────────────────────────────────────────────────────────────────
-function Inspector({ detail, run, onAction }: {
-  detail: Record<string, unknown> | undefined; run: { id: string } | null;
-  onAction: (label: string, fn: () => Promise<unknown>) => void;
-}) {
-  if (!detail) return <EmptyState icon={Compass} title="Loading…" />;
-  const kind = detail.kind as string;
-  const id = detail.id as string;
-  const title = detail.title as string;
-  const facts = (detail.facts as Array<Record<string, unknown>>) ?? [];
-  const intents = (detail.intents as Array<Record<string, unknown>>) ?? [];
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="border-b border-border p-3">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/60">{kind}</span>
-        <h2 className="mt-0.5 text-sm font-medium text-foreground">{title}</h2>
-        {detail.state != null && <StatusIndicator className="mt-1" tone="info" label={String(detail.state)} />}
-      </div>
-
-      <div className="space-y-3 p-3 text-xs">
-        {kind === "goal" && (
-          <>
-            {detail.success_criteria != null && <KV k="criteria" v={JSON.stringify(detail.success_criteria)} />}
-            {detail.completion_reason != null && <KV k="reason" v={String(detail.completion_reason)} />}
-            {run && (
-              <div className="flex flex-wrap gap-1.5">
-                <ActBtn icon={ArrowUp} label="Raise priority" onClick={() => onAction("Priority raised", () => engPrioritizeGoal(run.id, id, 1))} />
-                <ActBtn icon={Ban} label="Block" danger onClick={() => onAction("Goal blocked", () => engBlockGoal(run.id, id))} />
-              </div>
-            )}
-            <RelList title={`Intents (${intents.length})`} items={intents.map((i) => `${i.tool_name} → ${i.target}  [${i.state}]`)} />
-          </>
-        )}
-        {kind === "intent" && (
-          <>
-            <KV k="tool" v={String(detail.tool_name)} mono />
-            <KV k="target" v={String(detail.target)} mono />
-            {detail.rationale ? <KV k="rationale" v={String(detail.rationale)} /> : null}
-            <KV k="approval" v={String(detail.approval_state)} />
-            {detail.execution_summary ? <KV k="result" v={String(detail.execution_summary)} /> : null}
-            {detail.error ? <KV k="error" v={String(detail.error)} /> : null}
-            {run && (
-              <div className="flex flex-wrap gap-1.5">
-                {detail.approval_state === "pending" && (
-                  <>
-                    <ActBtn icon={Check} label="Approve" onClick={() => onAction("Intent approved", () => engApproveIntent(run.id, id))} />
-                    <ActBtn icon={X} label="Reject" danger onClick={() => onAction("Intent rejected", () => engRejectIntent(run.id, id))} />
-                  </>
+    <ol className="flex flex-wrap items-stretch gap-2">
+      {goals.map((g, i) => {
+        const s = GOAL_STATE[g.state ?? ""] ?? GOAL_STATE.pending;
+        const doneish = g.state === "achieved";
+        return (
+          <li key={g.id} className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onPick(g.id)}
+              title={s.hint}
+              className={cn(
+                "flex items-center gap-2.5 rounded-lg border bg-card px-3 py-2 text-left transition-colors hover:bg-accent",
+                activeId === g.id ? "border-sky-500/60" : "border-border",
+                g.state === "locked" && "opacity-55",
+              )}
+            >
+              <span
+                className={cn(
+                  "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
+                  doneish ? "bg-emerald-500 text-white" : g.state === "running" ? "bg-sky-500 text-white" : "bg-muted text-muted-foreground",
                 )}
-                <ActBtn icon={Ban} label="Cancel" danger onClick={() => onAction("Intent cancelled", () => engCancelIntent(run.id, id))} />
-              </div>
-            )}
-          </>
-        )}
-        {kind === "fact" && (
-          <>
-            <KV k="type" v={String(detail.fact_type)} mono />
-            <KV k="asset" v={String(detail.asset)} mono />
-            <KV k="source" v={String(detail.source)} />
-            <KV k="confidence" v={String(detail.confidence)} />
-            {detail.content != null && <KV k="content" v={JSON.stringify(detail.content)} />}
-            {detail.evidence_reference != null && <KV k="evidence" v={String(detail.evidence_reference)} />}
-          </>
-        )}
-        {facts.length > 0 && kind !== "fact" && (
-          <RelList title={`Supporting facts (${facts.length})`} items={facts.map((f) => String(f.title))} />
-        )}
-      </div>
-    </div>
+              >
+                {g.state === "locked" ? <Lock className="h-3 w-3" /> : g.step}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[12.5px] font-medium leading-tight text-foreground">{g.label}</span>
+                <span className="mt-0.5 flex items-center gap-1.5">
+                  <Pill tone={s.tone} pulse={g.state === "running"}>
+                    {s.label}
+                  </Pill>
+                  <span className="text-[10.5px] text-muted-foreground">
+                    {g.intents ?? 0} intents · {g.events ?? 0} events
+                  </span>
+                </span>
+              </span>
+            </button>
+            {i < goals.length - 1 && <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
-function KV({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
+// ── legend ────────────────────────────────────────────────────────────────────
+
+function Legend() {
   return (
-    <div className="flex gap-2">
-      <span className="w-20 shrink-0 text-muted-foreground/70">{k}</span>
-      <span className={cn("min-w-0 break-all text-foreground", mono && "font-mono")}>{v}</span>
-    </div>
-  );
-}
-function RelList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <div>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">{title}</div>
-      <div className="space-y-0.5">
-        {items.slice(0, 40).map((t, i) => (
-          <div key={i} className="truncate rounded px-1.5 py-1 font-mono text-[11px] text-muted-foreground hover:bg-accent/40">{t}</div>
+    <div className="flex max-w-[380px] flex-col gap-2 rounded-lg border border-border bg-card/95 p-2.5 text-[11px] shadow-md backdrop-blur">
+      <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+        {LEGEND_KINDS.map((k) => {
+          const m = KIND[k];
+          const Icon = m.icon;
+          return (
+            <span key={k} className="inline-flex items-center gap-1.5 text-foreground/90">
+              <span className={cn("flex h-4 w-4 items-center justify-center rounded", m.tile)}>
+                <Icon className="h-2.5 w-2.5 text-white" />
+              </span>
+              {m.label}
+            </span>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1.5 border-t border-border pt-2 text-muted-foreground">
+        {(Object.keys(REL) as ExploreRel[]).map((k) => (
+          <span key={k} className="inline-flex items-center gap-1.5">
+            <svg width="16" height="4" aria-hidden>
+              <line x1="0" y1="2" x2="16" y2="2" stroke={REL[k].color} strokeWidth="2" strokeDasharray={REL[k].dashed ? "4 3" : undefined} />
+            </svg>
+            {REL[k].label}
+          </span>
         ))}
       </div>
     </div>
   );
 }
-function ActBtn({ icon: Icon, label, onClick, danger }: { icon: typeof Target; label: string; onClick: () => void; danger?: boolean }) {
+
+// ── detail panel ──────────────────────────────────────────────────────────────
+
+function ago(iso?: string) {
+  if (!iso) return null;
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+function Row({ k, children }: { k: string; children: ReactNode }) {
   return (
-    <button onClick={onClick}
-      className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors",
-        danger ? "border-critical/40 text-critical hover:bg-critical/10" : "border-border text-foreground hover:bg-accent")}>
-      <Icon className="h-3 w-3" /> {label}
-    </button>
+    <div className="flex items-start gap-3 py-1">
+      <dt className="w-20 shrink-0 text-muted-foreground">{k}</dt>
+      <dd className="min-w-0 flex-1 break-words text-foreground">{children}</dd>
+    </div>
+  );
+}
+
+function Chips({ items, onPick }: { items: string[]; onPick?: (s: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((t) => (
+        <button
+          key={t}
+          type="button"
+          disabled={!onPick}
+          onClick={() => onPick?.(t)}
+          className={cn("rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10.5px]", onPick && "hover:border-sky-500/60 hover:text-sky-300")}
+        >
+          {t}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DetailPanel({
+  node,
+  displayId,
+  byId,
+  onSelect,
+  onClose,
+}: {
+  node: ExploreNode;
+  displayId: string;
+  byId: Map<string, ExploreNode>;
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  const meta = KIND[node.kind];
+  const Icon = meta.icon;
+  const [copied, setCopied] = useState(false);
+  const raw = JSON.stringify(node, null, 2);
+  const pickIntent = (tool: string) => byId.has(`intent:${tool}`) && onSelect(`intent:${tool}`);
+
+  return (
+    <aside className="absolute bottom-3 right-3 top-3 z-10 flex w-80 animate-slide-in-right flex-col overflow-hidden rounded-lg border border-border bg-card/95 text-xs shadow-xl backdrop-blur">
+      <header className="flex items-center gap-2.5 border-b border-border p-3">
+        <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-lg", meta.tile)}>
+          <Icon className="h-4 w-4 text-white" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold text-foreground">{node.label}</div>
+          <div className="font-mono text-[10.5px] text-muted-foreground">
+            {meta.label} · {displayId}
+          </div>
+        </div>
+        <button type="button" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Close">
+          <X className="h-4 w-4" />
+        </button>
+      </header>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        {node.summary && node.kind !== "intent" && <p className="leading-relaxed text-muted-foreground">{node.summary}</p>}
+        <dl>
+          {(node.kind === "goal" || node.kind === "intent" || node.kind === "vulnerability") && <Row k="Status">{statePill(node)}</Row>}
+          {node.reason && <Row k="Why">{node.reason}</Row>}
+          {node.priority != null && <Row k="Priority">P{node.priority}</Row>}
+          {node.tier && node.kind === "intent" && <Row k="Goal">{TIER_LABEL[node.tier] ?? node.tier}</Row>}
+          {node.kind === "intent" && node.summary && <Row k="Output">{node.summary}</Row>}
+          {node.kind === "goal" && <Row k="Intents">{node.intents ?? 0}</Row>}
+          {node.events != null && <Row k="Events">{node.events}</Row>}
+          {node.count != null && node.kind !== "intent" && <Row k="Count">{node.count}</Row>}
+          {node.hosts != null && node.hosts > 0 && <Row k="Hosts">{node.hosts}</Row>}
+          {node.first_seen && <Row k="Started">{ago(node.first_seen)}</Row>}
+          {node.last_seen && <Row k="Last output">{ago(node.last_seen)}</Row>}
+          {node.failed_jobs != null && <Row k="Failed runs">{node.failed_jobs}</Row>}
+          {node.more_facts != null && <Row k="More facts">{node.more_facts} more event types not shown</Row>}
+          {node.severity && <Row k="Severity">{node.severity}</Row>}
+          {node.category && <Row k="Category"><span className="font-mono">{node.category}</span></Row>}
+          {node.host && <Row k="Host"><span className="font-mono">{node.host}</span></Row>}
+          {node.confidence != null && <Row k="Confidence">{Math.round(node.confidence * 100)}%</Row>}
+          {node.mode && <Row k="Mode">{node.mode}</Row>}
+          {node.status && <Row k="Scan">{node.status}</Row>}
+          {node.in_scope && <Row k="In scope"><Chips items={node.in_scope} /></Row>}
+          {node.out_scope && <Row k="Out of scope"><Chips items={node.out_scope} /></Row>}
+          {node.caps && <Row k="Capabilities"><Chips items={node.caps.map((c) => c.toLowerCase())} /></Row>}
+          {node.fed_by && <Row k="Fed by"><Chips items={node.fed_by} onPick={pickIntent} /></Row>}
+          {node.feeds && <Row k="Feeds"><Chips items={node.feeds} onPick={pickIntent} /></Row>}
+        </dl>
+
+        {node.samples && node.samples.length > 0 && (
+          <section>
+            <h4 className="mb-1 text-[11px] font-medium text-muted-foreground">Examples</h4>
+            <ul className="space-y-0.5 font-mono text-[11px] text-foreground">
+              {node.samples.map((s) => (
+                <li key={s} className="break-all">{s}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <section className="border-t border-border pt-2">
+          <div className="mb-1 flex items-center justify-between">
+            <h4 className="text-[11px] font-medium text-muted-foreground">Raw</h4>
+            <button
+              type="button"
+              onClick={() =>
+                void navigator.clipboard?.writeText(raw).then(() => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1200);
+                })
+              }
+              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <Copy className="h-3 w-3" />
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background/60 p-2 font-mono text-[10.5px] text-muted-foreground">
+            {raw}
+          </pre>
+        </section>
+      </div>
+    </aside>
   );
 }

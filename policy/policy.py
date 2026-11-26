@@ -1,9 +1,9 @@
 """
 Central capability policy.
 
-A `CapabilityPolicy` is built once per scan from the selected mode (and whether
-intrusive testing is authorized) and then consulted everywhere a potentially
-active operation could start:
+A `CapabilityPolicy` is built once per scan from the selected **tier** (and
+whether intrusive testing is authorized) and then consulted everywhere a
+potentially active operation could start:
 
   - the controller filters which modules load/subscribe (strict, central);
   - `BaseModule.fetch` (target HTTP) and `BaseModule.run_proc` re-check at the
@@ -12,11 +12,26 @@ active operation could start:
   - the agent tool registry is filtered and each tool re-checks, so an AI
     recommendation cannot bypass the mode either.
 
+Tiers (each includes the one before it):
+
+  osint    passive external intelligence only — never touches the target
+  recon    + target DNS/HTTP, active discovery, fuzzing, port scanning
+  pentest  + vulnerability checks; intrusive tests only with --intrusive
+
+Legacy modes are accepted as deprecated aliases for one release: `active` and
+`full` resolve to `pentest` (identical capabilities). `vuln` keeps its narrower
+legacy ceiling (no fuzzing / port scanning / active discovery) rather than being
+silently widened to `pentest`.
+
 Fail-closed:
   - an unknown/invalid mode raises at construction;
-  - an unclassified module is permitted only in `full` (never in the restrictive
-    modes), with a reason;
+  - an unclassified module is denied in every tier (classify it in
+    `MODULE_CAPABILITIES` or declare a `capabilities` ClassVar);
   - `check()` denies any capability not explicitly allowed.
+
+Every module also has a **tier**: the lowest tier whose ceiling permits it,
+derived from its capabilities (`module_tier`), so it can never drift from what
+the policy actually enforces.
 
 Classification is by *behaviour*, not module name or flags — `MODULE_CAPABILITIES`
 was hand-audited from each module's actual target I/O (which is why `subfinder`,
@@ -37,37 +52,117 @@ CAP_PORT_SCANNING = "PORT_SCANNING"            # naabu / nmap
 CAP_VULNERABILITY_CHECK = "VULNERABILITY_CHECK"  # non-intrusive vuln assessment
 CAP_INTRUSIVE_TEST = "INTRUSIVE_TEST"          # intrusive checks — off unless authorized
 
+class CapabilityDenied(Exception):
+    """Raised when an operation requests a capability the mode does not allow."""
+
+
 ALL_CAPABILITIES = frozenset({
     CAP_PASSIVE_EXTERNAL, CAP_TARGET_DNS_QUERY, CAP_TARGET_HTTP_REQUEST,
     CAP_ACTIVE_DISCOVERY, CAP_FUZZING, CAP_PORT_SCANNING,
     CAP_VULNERABILITY_CHECK, CAP_INTRUSIVE_TEST,
 })
 
-# ── modes → allowed capabilities ────────────────────────────────────────────────
+# ── tiers → allowed capabilities ────────────────────────────────────────────────
 
-MODE_OSINT = "osint"
+TIER_OSINT = "osint"
+TIER_RECON = "recon"
+TIER_PENTEST = "pentest"
+TIERS = (TIER_OSINT, TIER_RECON, TIER_PENTEST)   # processing order; each includes the last
+
+_OSINT_CAPS = frozenset({CAP_PASSIVE_EXTERNAL})
+_RECON_CAPS = _OSINT_CAPS | {
+    CAP_TARGET_DNS_QUERY, CAP_TARGET_HTTP_REQUEST,
+    CAP_ACTIVE_DISCOVERY, CAP_FUZZING, CAP_PORT_SCANNING,
+}
+_PENTEST_CAPS = _RECON_CAPS | {CAP_VULNERABILITY_CHECK}
+
+TIER_CAPS: dict[str, frozenset[str]] = {
+    TIER_OSINT: _OSINT_CAPS,
+    TIER_RECON: _RECON_CAPS,
+    TIER_PENTEST: _PENTEST_CAPS,
+}
+
+# ── legacy modes (deprecated aliases, kept for one release) ─────────────────────
+
+MODE_OSINT = TIER_OSINT
 MODE_VULN = "vuln"
 MODE_ACTIVE = "active"
 MODE_FULL = "full"
-MODES = (MODE_OSINT, MODE_VULN, MODE_ACTIVE, MODE_FULL)
+LEGACY_MODES = (MODE_VULN, MODE_ACTIVE, MODE_FULL)
 
-_ACTIVE_CAPS = frozenset({
-    CAP_PASSIVE_EXTERNAL, CAP_TARGET_DNS_QUERY, CAP_TARGET_HTTP_REQUEST,
-    CAP_ACTIVE_DISCOVERY, CAP_FUZZING, CAP_PORT_SCANNING, CAP_VULNERABILITY_CHECK,
-})
+# Legacy name → the tier it now means. `vuln` is deliberately absent: it keeps
+# its own narrower ceiling (see MODE_CAPS) instead of being widened to pentest.
+LEGACY_ALIASES: dict[str, str] = {MODE_ACTIVE: TIER_PENTEST, MODE_FULL: TIER_PENTEST}
+
+# Every value accepted by --mode / the API / MCP. TIERS first (the primary set).
+MODES = TIERS + LEGACY_MODES
 
 MODE_CAPS: dict[str, frozenset[str]] = {
-    MODE_OSINT: frozenset({CAP_PASSIVE_EXTERNAL}),
+    **TIER_CAPS,
     MODE_VULN: frozenset({
         CAP_PASSIVE_EXTERNAL, CAP_TARGET_DNS_QUERY, CAP_TARGET_HTTP_REQUEST,
         CAP_VULNERABILITY_CHECK,
     }),
-    MODE_ACTIVE: _ACTIVE_CAPS,
-    MODE_FULL: _ACTIVE_CAPS,
+    MODE_ACTIVE: _PENTEST_CAPS,     # identical to pentest
+    MODE_FULL: _PENTEST_CAPS,       # identical to pentest
 }
 
 # Which modes may additionally unlock the intrusive tier (only when authorized).
-_INTRUSIVE_MODES = frozenset({MODE_ACTIVE, MODE_FULL})
+_INTRUSIVE_MODES = frozenset({TIER_PENTEST, MODE_ACTIVE, MODE_FULL})
+
+
+def resolve_mode(mode: str) -> tuple[str, str | None]:
+    """Canonical mode for `mode`, plus a deprecation note for a legacy name.
+
+    `active`/`full` → `pentest`; `vuln` stays `vuln` (legacy ceiling) with a
+    note; tiers pass through. Raises CapabilityDenied on an unknown value."""
+    if mode in TIERS:
+        return mode, None
+    if mode in LEGACY_ALIASES:
+        tier = LEGACY_ALIASES[mode]
+        return tier, (f"--mode {mode} is deprecated; it now means --mode {tier} "
+                      f"(same capabilities)")
+    if mode == MODE_VULN:
+        return mode, ("--mode vuln is deprecated and keeps its legacy ceiling (no "
+                      "fuzzing, port scanning or active discovery) for this release; "
+                      "use --mode pentest for the full pipeline")
+    raise CapabilityDenied(
+        f"invalid mode {mode!r} — fail-closed. Valid: {', '.join(TIERS)} "
+        f"(legacy: {', '.join(LEGACY_MODES)})")
+
+
+def intrusive_capable(mode: str) -> bool:
+    """Whether --intrusive can unlock INTRUSIVE_TEST in this mode (pentest only)."""
+    return mode in _INTRUSIVE_MODES
+
+
+def tier_of_caps(caps: frozenset[str] | None) -> str | None:
+    """The lowest tier whose ceiling permits `caps` (None if unclassified).
+
+    INTRUSIVE_TEST is part of no tier's base ceiling — it is unlocked on top of
+    pentest by --intrusive — so an intrusive module's tier is pentest."""
+    if not caps:
+        return None
+    if CAP_INTRUSIVE_TEST in caps:
+        # Unlockable only on top of pentest — never a lower tier, whatever else it needs.
+        base = frozenset(caps) - {CAP_INTRUSIVE_TEST}
+        return TIER_PENTEST if base <= TIER_CAPS[TIER_PENTEST] else None
+    base = frozenset(caps)
+    for tier in TIERS:
+        if base <= TIER_CAPS[tier]:
+            return tier
+    return None
+
+
+def tier_unlocked(mode: str | None, tier: str) -> bool:
+    """Whether `mode` permits any capability that `tier` adds over the tier
+    before it (a tier the mode forbids entirely is "locked")."""
+    caps = MODE_CAPS.get(mode or "")
+    if caps is None or tier not in TIER_CAPS:
+        return caps is None
+    idx = TIERS.index(tier)
+    added = TIER_CAPS[tier] - (TIER_CAPS[TIERS[idx - 1]] if idx else frozenset())
+    return bool(caps & added)
 
 # ── authoritative, behaviour-audited module classification ──────────────────────
 # NOTE: classified by what each module actually does to the TARGET, not by its
@@ -152,16 +247,10 @@ VULN_MODE_MODULES = [
 ]
 
 
-class CapabilityDenied(Exception):
-    """Raised when an operation requests a capability the mode does not allow."""
-
-
 class CapabilityPolicy:
     def __init__(self, mode: str, *, intrusive_authorized: bool = False) -> None:
-        if mode not in MODES:
-            raise CapabilityDenied(
-                f"invalid mode {mode!r} — fail-closed. Valid modes: {', '.join(MODES)}"
-            )
+        # Canonicalise legacy names (active/full → pentest); raises on unknown.
+        mode, self.deprecation = resolve_mode(mode)
         self.mode = mode
         self.intrusive_authorized = bool(intrusive_authorized)
         allowed = set(MODE_CAPS[mode])
@@ -203,14 +292,17 @@ class CapabilityPolicy:
         caps = self.capabilities_of(module_cls)
         name = getattr(module_cls, "name", "?")
         if caps is None:
-            # Unclassified: fail-closed. Only permitted in full, with a warning.
-            if self.mode == MODE_FULL:
-                return True, "unclassified (permitted only in full mode)"
+            # Unclassified: fail-closed in every tier.
             return False, "unclassified capability — fail-closed (classify it in policy.MODULE_CAPABILITIES)"
         disallowed = caps - self._allowed
         if disallowed:
             return False, f"requires {', '.join(sorted(disallowed))} (blocked in mode '{self.mode}')"
         return True, "allowed"
+
+    @classmethod
+    def module_tier(cls, module_cls) -> str | None:
+        """The lowest tier that may run this module (derived from capabilities)."""
+        return tier_of_caps(cls.capabilities_of(module_cls))
 
     def module_caps_label(self, module_cls) -> str:
         caps = self.capabilities_of(module_cls)
@@ -232,11 +324,15 @@ class CapabilityPolicy:
         through module filtering, so it can only ever shrink from here.
         """
         from modules.registry import FULL_MODULES
-        if self.mode in (MODE_ACTIVE, MODE_FULL):
+        if self.mode == TIER_PENTEST:
             return list(FULL_MODULES)
+        if self.mode == TIER_RECON:
+            # the full pipeline minus anything that needs the pentest tier
+            return [n for n in FULL_MODULES
+                    if (c := get_class(n)) is not None and self.module_allowed(c)[0]]
         if self.mode == MODE_VULN:
             return list(VULN_MODE_MODULES)
-        if self.mode == MODE_OSINT:
+        if self.mode == TIER_OSINT:
             # every module that is passive-external only
             names = []
             for name in sorted(MODULE_CAPABILITIES):
@@ -259,6 +355,7 @@ class _AllowAllPolicy(CapabilityPolicy):
 
     def __init__(self) -> None:
         self.mode = "unrestricted"
+        self.deprecation = None
         self.intrusive_authorized = True
         self._allowed = ALL_CAPABILITIES
 
