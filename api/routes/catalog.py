@@ -16,13 +16,14 @@ router = APIRouter(prefix="/api", tags=["catalog"], dependencies=[Depends(requir
 @router.get("/catalog")
 async def catalog() -> dict:
     from modules.registry import ModuleRegistry, SCAN_PROFILES
-    from policy import MODES
+    from policy import TIERS
 
     ModuleRegistry.discover()
     modules = [
-        {"name": r["name"], "description": r["description"], "flags": r["flags"]}
+        {"name": r["name"], "description": r["description"], "flags": r["flags"],
+         "tier": r["tier"]}
         for r in ModuleRegistry.info()
     ]
     profiles = [{"name": n, "description": p.get("description", "")}
                 for n, p in SCAN_PROFILES.items()]
-    return {"modules": modules, "modes": list(MODES), "profiles": profiles}
+    return {"modules": modules, "modes": list(TIERS), "profiles": profiles}

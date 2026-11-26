@@ -34,7 +34,7 @@ class ScanJob(SQLModel, table=True):
     target_domain: str = Field(index=True)
     # Stored as JSON: {"in_scope": [...], "out_scope": [...], "max_distance": N}
     scope_config: Optional[Any] = Field(default=None, sa_column=Column(JSON))
-    mode: str = Field(default="active")      # recon execution mode: osint | active | vuln | full
+    mode: str = Field(default="pentest")     # execution tier: osint | recon | pentest (legacy rows: active | vuln | full)
     #   (AI-assisted vs deterministic is orthogonal — derivable from AiAssessment rows)
     status: str = Field(default="running")   # running / complete / failed
     event_count: int = Field(default=0)

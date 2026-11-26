@@ -24,7 +24,7 @@ def build_config(settings, version: str) -> dict:
     import os
 
     from net.headers import available as browser_profiles
-    from policy import MODES
+    from policy import TIERS
     from scheduler.pool import WorkerPool
 
     host = settings.host
@@ -50,6 +50,6 @@ def build_config(settings, version: str) -> dict:
             "worker_ceiling": WorkerPool.SAFETY_CEILING,
             "browser_profile": "chrome-windows",
         },
-        "modes": list(MODES),
+        "modes": list(TIERS),           # selectable tiers (legacy names still accepted)
         "browser_profiles": browser_profiles(),
     }

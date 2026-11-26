@@ -133,23 +133,25 @@ def scan(
     full: bool = typer.Option(
         False, "--full",
         help="Enable ALL modules: default + passive + web + crawl + discovery. "
-             "(Legacy; prefer --mode full. Equivalent to --mode full when no --mode given.)",
+             "(Legacy; prefer --mode pentest / `recon-ai pentest`.)",
     ),
     mode: str | None = typer.Option(
         None, "--mode",
         help=(
-            "Execution mode — the central capability ceiling AND default module set:\n"
+            "Execution tier — the central capability ceiling AND default module set "
+            "(each tier includes the one before):\n"
             "osint = passive external intel only (NO target probing/fuzzing/scanning); "
-            "vuln = minimal discovery + vulnerability assessment; "
-            "active = passive + full active recon + non-intrusive vuln checks; "
-            "full = complete authorized pipeline. "
-            "Enforced throughout execution (incl. the AI agent). Omit = legacy behaviour "
-            "(active ceiling + your -m/--profile/--full selection)."
+            "recon = + active discovery: resolve, probe, port-scan, crawl, fuzz; "
+            "pentest = + evidence-based vulnerability checks (--intrusive adds the "
+            "intrusive tier). Enforced throughout execution (incl. the AI agent). "
+            "Same as `recon-ai osint|recon|pentest`. Legacy active/full (= pentest) "
+            "and vuln are deprecated aliases. Omit = legacy behaviour (pentest "
+            "ceiling + your -m/--profile/--full selection)."
         ),
     ),
     intrusive: bool = typer.Option(
         False, "--intrusive",
-        help="Authorize the INTRUSIVE check tier (active/full modes only). Off by "
+        help="Authorize the INTRUSIVE check tier (pentest tier only). Off by "
              "default; requires explicit opt-in. Never enables destructive payloads.",
     ),
     # ── related (sibling) root domains ────────────────────────────────────────
@@ -385,15 +387,21 @@ def scan(
         typer.echo(f"[error] unknown --plan-mode {plan_mode!r}. Available: {', '.join(MODES)}", err=True)
         raise typer.Exit(code=1)
 
-    # Execution mode = the central capability ceiling. Fail-closed on an invalid
-    # value; default "active" preserves legacy behaviour when --mode is omitted.
-    from policy import MODES as EXEC_MODES
-    if mode is not None and mode not in EXEC_MODES:
-        typer.echo(f"[error] unknown --mode {mode!r}. Available: {', '.join(EXEC_MODES)}", err=True)
-        raise typer.Exit(code=1)
-    exec_mode = mode or "active"
-    if intrusive and exec_mode not in ("active", "full"):
-        typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' mode (only active/full)"))
+    # Execution tier = the central capability ceiling. Fail-closed on an invalid
+    # value; legacy names resolve to their tier (active/full → pentest) with a
+    # deprecation note. Omitted = pentest ceiling, identical to the old default.
+    from policy import CapabilityDenied, intrusive_capable, resolve_mode
+    exec_mode = "pentest"
+    if mode is not None:
+        try:
+            exec_mode, deprecation = resolve_mode(mode)
+        except CapabilityDenied as exc:
+            typer.echo(f"[error] {exc}", err=True)
+            raise typer.Exit(code=1)
+        if deprecation:
+            typer.echo(ui.warn(deprecation))
+    if intrusive and not intrusive_capable(exec_mode):
+        typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' (pentest tier only)"))
     user_selected = profile is not None or bool(list(module)) or full or passive
 
     # Resolve module selection — profiles take precedence.
@@ -454,7 +462,7 @@ def scan(
 
     typer.echo(ui.kv("in-scope", resolved_in))
     typer.echo(ui.kv("out-scope", resolved_out or "(none)"))
-    typer.echo(ui.kv("exec-mode", exec_mode + ("  +intrusive" if (intrusive and exec_mode in ('active', 'full')) else "")))
+    typer.echo(ui.kv("exec-mode", exec_mode + ("  +intrusive" if (intrusive and intrusive_capable(exec_mode)) else "")))
     ai_label = "A — deterministic"
     if agent:
         ai_label = "B+agent — AI triage + agent loop"
@@ -482,8 +490,8 @@ def scan(
     if ai_effective and not api_key:
         typer.echo(ui.warn("ANTHROPIC_API_KEY not set — triage will be skipped"), err=True)
 
-    # Unlock the vulnassess intrusive tier only when authorized in an active/full mode.
-    intrusive_ok = intrusive and exec_mode in ("active", "full")
+    # Unlock the vulnassess intrusive tier only when authorized in the pentest tier.
+    intrusive_ok = intrusive and intrusive_capable(exec_mode)
     if intrusive_ok:
         profile_config = {**(profile_config or {}),
                           "vulnassess": {**(profile_config or {}).get("vulnassess", {}),
@@ -529,6 +537,39 @@ def scan(
         raise typer.Exit(code=130)
 
 
+# ── tier subcommands: `recon-ai osint|recon|pentest <domain>` ────────────────────
+# Each is `scan --mode <tier>` with the exact same options (minus --mode), built
+# from scan's own signature so the two can never drift apart.
+
+def _tier_command(tier: str, doc: str):
+    import inspect
+    from typing import get_type_hints
+
+    sig = inspect.signature(scan, eval_str=True)
+    params = [p for name, p in sig.parameters.items() if name != "mode"]
+
+    def command(**kwargs):
+        return scan(mode=tier, **kwargs)
+
+    command.__signature__ = sig.replace(parameters=params)
+    command.__annotations__ = {k: v for k, v in get_type_hints(scan).items() if k != "mode"}
+    command.__doc__ = doc
+    command.__name__ = command.__qualname__ = f"{tier}_scan"
+    return command
+
+
+TIER_COMMANDS = {
+    "osint": "Tier 1 — passive OSINT only. Never sends a packet to the target "
+             "(same as `scan --mode osint`).",
+    "recon": "Tier 2 — OSINT + active enumeration: resolve, probe, port-scan, "
+             "fingerprint, crawl, fuzz. No vulnerability checks (same as `scan --mode recon`).",
+    "pentest": "Tier 3 — recon + evidence-based vulnerability checks; add --intrusive "
+               "for the intrusive tier (same as `scan --mode pentest`).",
+}
+for _tier, _doc in TIER_COMMANDS.items():
+    app.command(name=_tier)(_tier_command(_tier, _doc))
+
+
 # ── modules ───────────────────────────────────────────────────────────────────
 
 @app.command(name="modules")
@@ -550,11 +591,12 @@ def list_modules(
     if not rows:
         typer.echo("No modules found.")
         return
-    typer.echo(f"{'NAME':<20}  {'FLAGS':<36}  DESCRIPTION")
-    typer.echo("-" * 88)
+    typer.echo(f"{'NAME':<20}  {'TIER':<8}  {'FLAGS':<36}  DESCRIPTION")
+    typer.echo("-" * 98)
     for r in rows:
         flags = ", ".join(r["flags"]) or "-"
-        typer.echo(f"{r['name']:<20}  {flags:<36}  {r['description']}")
+        typer.echo(f"{r['name']:<20}  {r['tier'] or '-':<8}  {flags:<36}  {r['description']}")
+    typer.echo("\nTIER = the lowest tier that may run the module (from its capabilities).")
 
 
 # ── triage ────────────────────────────────────────────────────────────────────

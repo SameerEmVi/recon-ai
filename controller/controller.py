@@ -69,7 +69,7 @@ class ScanController:
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
         # Execution mode & capability policy (osint | active | vuln | full)
-        mode: str = "active",
+        mode: str = "pentest",
         intrusive_authorized: bool = False,
         # Adaptive Reconnaissance Planner
         plan_mode: str = "default",          # passive-first | default | aggressive
@@ -130,7 +130,8 @@ class ScanController:
         # Central capability policy — fail-closed on an invalid mode.
         from policy import CapabilityPolicy
         self._policy = CapabilityPolicy(mode, intrusive_authorized=intrusive_authorized)
-        self._mode = mode
+        # Canonical tier (legacy active/full → pentest) — what the scan row records.
+        self._mode = self._policy.mode
         self._disabled_modules: list[tuple[str, str]] = []
         from planner import PlannerConfig, ReconPlanner
         self._planner = ReconPlanner(
