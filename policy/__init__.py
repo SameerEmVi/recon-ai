@@ -64,4 +64,15 @@ __all__ = [
     "CAP_PORT_SCANNING",
     "CAP_VULNERABILITY_CHECK",
     "CAP_INTRUSIVE_TEST",
+    "Engagement",
+    "EngagementError",
+    "load_engagement",
+    "parse_engagement",
 ]
+
+from policy.engagement import (  # noqa: E402
+    Engagement,
+    EngagementError,
+    load_engagement,
+    parse_engagement,
+)

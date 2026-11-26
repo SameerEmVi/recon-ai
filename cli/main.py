@@ -149,6 +149,13 @@ def scan(
             "ceiling + your -m/--profile/--full selection)."
         ),
     ),
+    engagement: str | None = typer.Option(
+        None, "--engagement",
+        help="Path to an engagement.yaml (authorization record): sets scope, "
+             "pacing, tier and — via its explicit `authorization` field — whether "
+             "the intrusive tier may unlock. When given, it is the authority for "
+             "scope + intrusive authorization (CLI --intrusive alone cannot unlock).",
+    ),
     intrusive: bool = typer.Option(
         False, "--intrusive",
         help="Authorize the INTRUSIVE check tier (pentest tier only). Off by "
@@ -321,8 +328,29 @@ def scan(
         ui.set_color(color)
     print(ui.banner())
 
-    resolved_in = list(in_scope) or [f"*.{domain}", domain]
-    resolved_out = list(out_scope)
+    # Engagement file (optional): the authorization record. When present it
+    # supplies scope / pacing / tier defaults and is the authority for intrusive
+    # testing (fail-closed if it can't be loaded).
+    eng = None
+    if engagement is not None:
+        from policy import EngagementError, load_engagement
+        try:
+            eng = load_engagement(engagement)
+        except EngagementError as exc:
+            typer.echo(f"[error] {exc}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(ui.kv("engagement", f"{engagement} — tier {eng.tier}, intrusive "
+                         f"{'authorized' if eng.authorizes_intrusive() else 'off'}"))
+
+    resolved_in = list(in_scope) or (eng.in_scope if eng and eng.in_scope else None) \
+        or [f"*.{domain}", domain]
+    resolved_out = list(out_scope) or (eng.out_scope if eng else [])
+    if eng and max_distance == 5:
+        max_distance = eng.max_distance
+    if eng and eng.rate_limit is not None and rate_limit is None:
+        rate_limit = eng.rate_limit
+    if eng and eng.max_concurrency is not None and max_concurrency is None:
+        max_concurrency = eng.max_concurrency
 
     try:
         scope = Scope.from_strings(
@@ -391,7 +419,8 @@ def scan(
     # value; legacy names resolve to their tier (active/full → pentest) with a
     # deprecation note. Omitted = pentest ceiling, identical to the old default.
     from policy import CapabilityDenied, intrusive_capable, resolve_mode
-    exec_mode = "pentest"
+    # Default tier: --mode, else the engagement's tier, else pentest.
+    exec_mode = eng.tier if (eng and mode is None) else "pentest"
     if mode is not None:
         try:
             exec_mode, deprecation = resolve_mode(mode)
@@ -402,6 +431,12 @@ def scan(
             typer.echo(ui.warn(deprecation))
     if intrusive and not intrusive_capable(exec_mode):
         typer.echo(ui.warn(f"--intrusive ignored in '{exec_mode}' (pentest tier only)"))
+    # With an engagement file, it is the authority for intrusive testing: the
+    # file must authorize it (explicit `authorization` + `intrusive: true`). A
+    # bare --intrusive cannot unlock it. Without a file, --intrusive behaves as before.
+    if eng is not None and intrusive and not eng.authorizes_intrusive():
+        typer.echo(ui.warn("--intrusive not authorized by the engagement file "
+                            "(needs intrusive: true + an authorization statement) — ignored"))
     user_selected = profile is not None or bool(list(module)) or full or passive
 
     # Resolve module selection — profiles take precedence.
@@ -490,12 +525,24 @@ def scan(
     if ai_effective and not api_key:
         typer.echo(ui.warn("ANTHROPIC_API_KEY not set — triage will be skipped"), err=True)
 
-    # Unlock the vulnassess intrusive tier only when authorized in the pentest tier.
+    # Unlock the vulnassess intrusive tier only when authorized in the pentest
+    # tier. With an engagement file, the file is the authority (fail-closed):
+    # intrusive runs only if the file authorizes it.
     intrusive_ok = intrusive and intrusive_capable(exec_mode)
+    if eng is not None:
+        intrusive_ok = intrusive_ok and eng.authorizes_intrusive()
     if intrusive_ok:
         profile_config = {**(profile_config or {}),
                           "vulnassess": {**(profile_config or {}).get("vulnassess", {}),
                                          "intrusive": True, "authorized_intrusive": True}}
+
+    # Engagement banned-tools: drop them from an explicit module selection
+    # (defence-in-depth; a banned tool never loads).
+    if eng and eng.banned_tools and enabled_modules:
+        banned = [m for m in enabled_modules if eng.is_tool_banned(m)]
+        if banned:
+            enabled_modules = [m for m in enabled_modules if not eng.is_tool_banned(m)]
+            typer.echo(ui.warn(f"engagement banned tools removed: {', '.join(banned)}"))
 
     from controller.controller import ScanController
     controller = ScanController(
