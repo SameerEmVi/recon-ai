@@ -94,8 +94,8 @@ def build_exchange(
         method=(captured.method or "GET").upper()[:16],
         url=sanitize_url(captured.url),
         status_code=captured.status_code,
-        request_headers=redact_headers(captured.request_headers) or None,
-        response_headers=redact_headers(captured.response_headers) or None,
+        request_headers=redact_headers(captured.request_headers or {}) or None,
+        response_headers=redact_headers(captured.response_headers or {}) or None,
         request_body=enc_req,
         response_body=enc_resp,
         body_encrypted=encrypted,
@@ -106,6 +106,54 @@ def build_exchange(
         duration_ms=captured.duration_ms,
         source_tool=captured.source_tool,
     )
+
+
+def exchange_from_fetch(
+    result,
+    *,
+    host: str,
+    source_tool: str,
+    method: str = "GET",
+    request_headers: dict | None = None,
+    duration_ms: float | None = None,
+) -> CapturedExchange:
+    """Build a CapturedExchange from a recon.fetch.FetchResult (a GET snapshot:
+    status, response headers, body text). The verbatim response body is the
+    proof; request body is None for a GET."""
+    return CapturedExchange(
+        host=host,
+        method=method,
+        url=getattr(result, "url", "") or "",
+        status_code=getattr(result, "status_code", None),
+        request_headers=request_headers,
+        response_headers=dict(getattr(result, "headers", {}) or {}),
+        request_body=None,
+        response_body=getattr(result, "text", None),
+        duration_ms=duration_ms,
+        source_tool=source_tool,
+    )
+
+
+async def record_exchange(controller, captured: CapturedExchange, *, finding_id=None):
+    """Capture-and-store glue: build the (redacted, encrypted) exchange and
+    persist it. The single entry point a tool/check calls after a request.
+
+    Off-by-default and never raises: returns None when there is no evidence key
+    (bodies-not-stored would still persist metadata, but we only record when the
+    operator opted into the evidence store), no persister (no --db-url), or any
+    failure. Returns the stored exchange id otherwise (for later finding-link)."""
+    from evidence.crypto import get_cipher
+
+    cipher = get_cipher(controller)
+    persister = getattr(controller, "persister", None)
+    if not cipher.enabled or persister is None:
+        return None
+    try:
+        scan_id = getattr(controller, "scan_id", None)
+        exchange = build_exchange(captured, cipher, scan_id=scan_id, finding_id=finding_id)
+        return await persister.save_exchange(exchange)
+    except Exception:
+        return None
 
 
 def _decrypt_text(blob, cipher: EvidenceCipher, encrypted: bool) -> str | None:

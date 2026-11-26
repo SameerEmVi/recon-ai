@@ -762,6 +762,12 @@ class ScanController:
         return self._evidence_cipher
 
     @property
+    def persister(self):
+        """The scan's Persister (None when no --db-url). Read-only accessor so
+        tools/modules can store evidence without reaching a private attribute."""
+        return self._persister
+
+    @property
     def scheduler_report(self):
         """The hybrid engine's SchedulerReport (None unless a --hybrid run ran)."""
         return self._scheduler_report

@@ -14,6 +14,8 @@ from evidence import (
     CapturedExchange,
     build_exchange,
     exchange_for_display,
+    exchange_from_fetch,
+    record_exchange,
 )
 from evidence.crypto import EvidenceCipher, EvidenceKeyError, get_cipher
 
@@ -121,6 +123,61 @@ def test_display_decrypts_for_operator_and_hides_ciphertext():
     # Without the key, the operator view shows no body (never raw ciphertext).
     blind = exchange_for_display(ex, EvidenceCipher(None))
     assert blind["response_body"] is None and blind["bodies_available"] is False
+
+
+# ── capture from a FetchResult + the record_exchange glue ─────────────────────────
+
+class _FetchResult:
+    def __init__(self):
+        self.url = "https://api.example.com/v1?token=secret123"
+        self.status_code = 200
+        self.text = '{"ok": true}'
+        self.headers = {"Server": "nginx", "Set-Cookie": "sid=xyz"}
+
+
+def test_exchange_from_fetch_snapshots_the_response():
+    cap = exchange_from_fetch(_FetchResult(), host="api.example.com", source_tool="probe")
+    assert cap.method == "GET" and cap.response_body == '{"ok": true}'
+    assert cap.status_code == 200 and cap.request_body is None
+    ex = build_exchange(cap, EvidenceCipher(KEY), scan_id=uuid.uuid4())
+    assert "secret123" not in ex.url and ex.response_headers["Set-Cookie"] == "***REDACTED***"
+
+
+class _Persister:
+    def __init__(self):
+        self.saved = []
+
+    async def save_exchange(self, exchange):
+        self.saved.append(exchange)
+        return exchange.id
+
+
+class _Controller:
+    def __init__(self, cipher, persister):
+        self.evidence_cipher = cipher
+        self.persister = persister
+        self.scan_id = uuid.uuid4()
+
+
+async def test_record_exchange_stores_when_enabled():
+    persister = _Persister()
+    ctrl = _Controller(EvidenceCipher(KEY), persister)
+    cap = exchange_from_fetch(_FetchResult(), host="api.example.com", source_tool="probe")
+    exid = await record_exchange(ctrl, cap)
+    assert exid is not None and len(persister.saved) == 1
+    assert persister.saved[0].body_encrypted
+
+
+async def test_record_exchange_is_noop_without_key_or_persister():
+    # No key → nothing stored (operator didn't opt into the evidence store).
+    off = _Controller(EvidenceCipher(None), _Persister())
+    assert await record_exchange(off, exchange_from_fetch(
+        _FetchResult(), host="h", source_tool="p")) is None
+    assert off.persister.saved == []
+    # No persister (no --db-url) → nothing stored, no crash.
+    nodb = _Controller(EvidenceCipher(KEY), None)
+    assert await record_exchange(nodb, exchange_from_fetch(
+        _FetchResult(), host="h", source_tool="p")) is None
 
 
 # ── persistence + finding link ────────────────────────────────────────────────────

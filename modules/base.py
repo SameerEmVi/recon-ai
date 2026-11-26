@@ -370,6 +370,44 @@ class BaseModule(ABC):
         key = ResponseCache.key(url, follow_redirects=follow_redirects)
         return _apply_cap(await cache.get_or_fetch(key, _do_fetch))
 
+    async def fetch_evidence(
+        self,
+        url: str,
+        *,
+        source_tool: str | None = None,
+        finding_id=None,
+        **fetch_kwargs,
+    ):
+        """`fetch(url)` plus capture of the request/response into the evidence
+        store (docs/pentest-section-design.md §6). The reusable capture-backed
+        request primitive every pentest check-tool uses.
+
+        Off-by-default and side-effect-free on the fetch itself: the capture is a
+        **no-op** (stores nothing) unless an evidence key *and* a DB persister are
+        configured, so recon behaviour is unchanged. Returns `(FetchResult,
+        exchange_id | None)`; the id lets a caller later link the exchange to the
+        finding it proves. Capture never affects the returned FetchResult and
+        never raises."""
+        import time
+        from urllib.parse import urlparse
+
+        from evidence.capture import exchange_from_fetch, record_exchange
+
+        start = time.monotonic()
+        result = await self.fetch(url, **fetch_kwargs)
+        exchange_id = None
+        try:
+            captured = exchange_from_fetch(
+                result,
+                host=urlparse(url).hostname or url,
+                source_tool=source_tool or self.name,
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
+            exchange_id = await record_exchange(self._ctrl, captured, finding_id=finding_id)
+        except Exception as exc:
+            self._log.debug("evidence capture failed for %s: %s", url, exc)
+        return result, exchange_id
+
     async def run_proc(
         self, cmd: list[str], *, timeout: int = 60, bucket: str | None = None,
         input_text: str | None = None,

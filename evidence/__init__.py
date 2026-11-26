@@ -25,6 +25,8 @@ from evidence.capture import (
     CapturedExchange,
     build_exchange,
     exchange_for_display,
+    exchange_from_fetch,
+    record_exchange,
 )
 from evidence.crypto import EvidenceCipher, get_cipher
 
@@ -33,6 +35,8 @@ __all__ = [
     "get_cipher",
     "CapturedExchange",
     "build_exchange",
+    "exchange_from_fetch",
+    "record_exchange",
     "exchange_for_display",
     "MAX_BODY_BYTES",
 ]
