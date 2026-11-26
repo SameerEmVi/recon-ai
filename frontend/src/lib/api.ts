@@ -657,3 +657,17 @@ export async function downloadReport(scanId: string, format: "md" | "html" | "js
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export interface RetestResult {
+  ok: boolean;
+  error?: string;
+  finding_id?: string;
+  url?: string;
+  outcome?: "reproducible" | "fixed";
+  finding?: PentestFinding;
+}
+export const retestFinding = (scanId: string, findingId: string) =>
+  apiFetch<RetestResult>("/api/pentest/retest", {
+    method: "POST",
+    body: JSON.stringify({ scan_id: scanId, finding_id: findingId }),
+  });

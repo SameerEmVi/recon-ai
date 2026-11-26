@@ -227,6 +227,19 @@ class AssessUrlTool(AgentTool):
         if not self._scope_ok(host):
             return ToolResult(0, f"scope denied: {host}")
 
+        made, total, _ = await self.assess(url)
+        return ToolResult(
+            made, f"assess_url {url} → {total} result(s), {made} finding(s) stored")
+
+    async def assess(self, url: str) -> tuple[int, int, set]:
+        """Run the capture-backed assessment of one URL and return
+        (findings_created, results, produced_identities). The capturing fetch and
+        context build live here so both `run` (agent loop) and the pentest
+        section's retest can reuse them. The caller is responsible for the scope +
+        capability pre-checks (`run` does them)."""
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or url
         fetcher = _PentestFetcher(self._controller)
         captured: dict[str, list] = {}
 
@@ -236,11 +249,9 @@ class AssessUrlTool(AgentTool):
                 captured.setdefault(u, []).append(exchange_id)
             return result
 
-        made, total = await self._assess(host, url, capturing_fetch, captured)
-        return ToolResult(
-            made, f"assess_url {url} → {total} result(s), {made} finding(s) stored")
+        return await self._assess(host, url, capturing_fetch, captured)
 
-    async def _assess(self, host: str, url: str, fetch, captured: dict) -> tuple[int, int]:
+    async def _assess(self, host: str, url: str, fetch, captured: dict) -> tuple[int, int, set]:
         """Build a one-URL context, run the checks, persist + link findings.
 
         Separated from run() so it is unit-testable with an injected fetch and a
@@ -259,8 +270,12 @@ class AssessUrlTool(AgentTool):
 
         persister = getattr(self._controller, "persister", None)
         made = 0
+        # (host, title, category) of every finding this run produced — lets a
+        # retest tell whether a specific finding still reproduces.
+        produced: set[tuple[str, str, str]] = set()
         for r in outcome.emitted:
             fd = r.to_finding_data()
+            produced.add((fd.host, fd.title, fd.category))
             if persister is None:
                 made += 1                     # no DB: results reasoned over, not stored
                 continue
@@ -278,7 +293,7 @@ class AssessUrlTool(AgentTool):
                 made += 1
             for exchange_id in captured.get(r.url or url, []):
                 await persister.link_exchange(exchange_id, finding.id)
-        return made, len(outcome.results)
+        return made, len(outcome.results), produced
 
     async def _load_host_context(self, ctx, host: str) -> None:
         """Populate ctx.technologies / ctx.urls from the recon scan's persisted
