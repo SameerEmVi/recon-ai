@@ -89,7 +89,12 @@ def build_report(
     outcome=None,
     scan_id=None,
     limitations: list[str] | None = None,
+    evidence: dict[str, list] | None = None,
 ) -> dict:
+    """`evidence` maps a result's dedup_key (asset|check_id|url) → a list of
+    captured-exchange display dicts (evidence.exchange_for_display), attached to
+    each finding as `evidence_exchanges` so the report can show the proof."""
+    evidence = evidence or {}
     by_sev = {s: 0 for s in SEVERITIES}
     by_status: dict[str, int] = {}
     assets: dict[str, int] = {}
@@ -113,6 +118,7 @@ def build_report(
             "remediation": r.remediation,
             "references": r.references,
             "evidence": r.evidence,
+            "evidence_exchanges": evidence.get(r.dedup_key, []),
             "tier": r.tier,
             "source_module": r.source_module,
             "timestamp": r.timestamp,
@@ -209,6 +215,88 @@ def render_text(report: dict) -> list[str]:
     ]
     lines += [f"- {l}" for l in report["limitations"]]
     return lines
+
+
+def _md_body(text: str | None, limit: int = 1200) -> str:
+    """A fenced-code quote of a captured body (truncated, backticks neutralised)."""
+    if not text:
+        return ""
+    body = text[:limit].replace("```", "ʼʼʼ")
+    more = "\n… (truncated)" if len(text) > limit else ""
+    return f"\n```\n{body}{more}\n```\n"
+
+
+def render_markdown(report: dict) -> str:
+    """Render the report as Markdown with per-finding request/response evidence —
+    the operator-facing, shareable deliverable (docs §5)."""
+    s = report["summary"]
+    out: list[str] = [
+        f"# Vulnerability Assessment — {report['target']}",
+        "",
+        f"- **Generated:** {report['generated_at']}",
+        f"- **Scan:** `{report.get('scan_id') or '(in-memory)'}`",
+        f"- **Results:** {s['total']} across {s['assets_affected']} asset(s)",
+        f"- **Severity:** {_bar(report)}",
+        "- **Verification:** "
+        + (", ".join(f"{k}={v}" for k, v in s["by_status"].items()) or "none"),
+        "",
+        "> All results are evidence-backed. CVE correlations are POTENTIAL/UNCONFIRMED —"
+        " never assumed present from a version string alone.",
+        "",
+        "## Findings",
+        "",
+    ]
+    if not report["findings"]:
+        out.append("_No vulnerability results._\n")
+    for i, f in enumerate(report["findings"], 1):
+        where = f["url"] or f["asset"]
+        out.append(f"### {i}. {f['name']} — `{f['severity'].upper()}` · {f['status']}")
+        out.append("")
+        out.append(f"- **Asset:** `{where}`")
+        out.append(f"- **Check:** `{f['check_id']}` · category `{f['category']}`"
+                   f" · confidence {f['confidence']:.2f} ({f['confidence_label']})")
+        if f["severity_rationale"]:
+            out.append(f"- **Why:** {f['severity_rationale']}")
+        if f["remediation"]:
+            out.append(f"- **Remediation:** {f['remediation']}")
+        if f["references"]:
+            out.append(f"- **References:** {', '.join(f['references'])}")
+        exchanges = f.get("evidence_exchanges") or []
+        if exchanges:
+            out.append("")
+            out.append(f"**Evidence** ({len(exchanges)} captured exchange(s)):")
+            for ex in exchanges:
+                out.append("")
+                out.append(f"- `{ex.get('method')} {ex.get('status_code')} "
+                           f"{ex.get('url')}` · {ex.get('source_tool') or 'tool'}")
+                resp = _md_body(ex.get("response_body"))
+                if resp:
+                    out.append("  Response body:" + resp)
+                elif ex.get("bodies_dropped"):
+                    out.append(f"  _{ex['bodies_dropped']}_")
+        elif f["evidence"]:
+            ev = ", ".join(f"{k}={v}" for k, v in list(f["evidence"].items())[:8])
+            out.append(f"- **Evidence:** {ev}")
+        out.append("")
+
+    cov = report["coverage"]
+    out += [
+        "## Assets affected",
+        "",
+        *([f"- `{a}`" for a in sorted({f['asset'] for f in report['findings']})] or ["_none_"]),
+        "",
+        "## Coverage",
+        "",
+        f"- **Executed:** {', '.join(cov['checks_executed']) or '(none)'}",
+        f"- **Skipped:** " + (", ".join(f"{k} ({v})" for k, v in cov["checks_skipped"].items()) or "(none)"),
+        f"- **Failed:** " + (", ".join(f"{k} ({v})" for k, v in cov["checks_failed"].items()) or "(none)"),
+        "",
+        "## Limitations",
+        "",
+        *[f"- {l}" for l in report["limitations"]],
+        "",
+    ]
+    return "\n".join(out)
 
 
 def summary_sections(report: dict) -> list[str]:

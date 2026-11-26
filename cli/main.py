@@ -654,49 +654,40 @@ async def _triage(
 def report(
     target: str = typer.Argument(..., help="Scan UUID, or a domain (uses its most recent scan)."),
     db_url: str = typer.Option(..., "--db-url", help="Database URL."),
-    json_out: bool = typer.Option(False, "--json", help="Emit structured JSON instead of text."),
+    json_out: bool = typer.Option(False, "--json", help="Shorthand for --format json."),
+    fmt: str = typer.Option("text", "--format", "-f", help="Output format: text | json | md (Markdown with per-finding evidence)."),
     output: str | None = typer.Option(None, "-O", "--output", help="Write to a file instead of stdout."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Render the evidence-based vulnerability report for a scan (text or JSON).
+    """Render the evidence-based vulnerability report for a scan.
 
-    Reads persisted findings — run a scan with --db-url --full first.
+    text (default) · json · md (Markdown with the captured request/response
+    evidence bound to each finding — the shareable deliverable). Reads persisted
+    findings; run a scan with --db-url first, then assess hosts in the pentest
+    section to capture evidence.
     """
     _setup_logging(verbose)
-    asyncio.run(_report(target, db_url, json_out, output))
+    resolved = "json" if json_out else fmt.lower()
+    if resolved not in ("text", "json", "md", "markdown"):
+        typer.echo(f"[error] unknown --format {fmt!r}. Use: text | json | md", err=True)
+        raise typer.Exit(code=1)
+    asyncio.run(_report(target, db_url, resolved, output))
 
 
-async def _report(target: str, db_url: str, json_out: bool, output: str | None) -> None:
-    from database.repository import FindingRepository, ScanRepository
-    from database.session import init_db, make_engine, make_session_factory
-    from vulnscan.report import build_report, render_json, render_text, result_from_finding
+async def _report(target: str, db_url: str, fmt: str, output: str | None) -> None:
+    from api.report import build_scan_report, render_report
 
-    engine = make_engine(db_url)
-    await init_db(engine)
-    async with make_session_factory(engine)() as session:
-        scan_repo = ScanRepository(session)
-        scan = None
-        try:
-            scan = await scan_repo.get(uuid.UUID(target))
-            domain = scan.target_domain if scan else target
-        except ValueError:
-            recent = await scan_repo.recent(target, limit=1)
-            scan = recent[0] if recent else None
-            domain = target
-        if scan is None:
-            typer.echo(f"[error] no scan found for {target!r}", err=True)
-            raise typer.Exit(code=1)
+    report, scan = await build_scan_report(db_url, target, with_evidence=True)
+    if report is None:
+        typer.echo(f"[error] no scan found for {target!r}", err=True)
+        raise typer.Exit(code=1)
 
-        findings = await FindingRepository(session).list_for_scan(scan.id)
-
-    results = [r for r in (result_from_finding(f) for f in findings) if r is not None]
-    rep = build_report(domain, results, scan_id=scan.id)
-    text = render_json(rep) if json_out else "\n".join(render_text(rep))
-
+    text = render_report(report, fmt)
+    n = report["summary"]["total"]
     if output:
         with open(output, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-        typer.echo(f"report written → {output}  ({len(results)} finding(s))")
+        typer.echo(f"report written → {output}  ({n} finding(s))")
     else:
         typer.echo(text)
 

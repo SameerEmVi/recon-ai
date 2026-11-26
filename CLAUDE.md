@@ -191,7 +191,12 @@ triage pass) and can never invent a finding or promote one to CONFIRMED.
   limitations). The **vulnassess** module attaches it to the aggregator's single
   writer (`attach_vuln_report` → `vulnerabilities.txt`/`.json` + a summary
   section, mirroring `attach_intelligence`); the `recon-ai report` CLI renders it
-  from persisted findings.
+  from persisted findings. **Evidence-aware report** (`vulnscan/report.py::
+  render_markdown` + `api/report.py::build_scan_report`): a Markdown deliverable
+  with each finding's captured request/response **evidence** quoted inline (bodies
+  only when the server holds `RECON_AI_EVIDENCE_KEY`). `recon-ai report …
+  --format text|json|md`, `GET /api/report?scan_id=&format=`, and a "Report"
+  download on the Pentest page.
 
 Controller wiring: `ScanController` exposes `aggregator` (read-only) and calls
 `bus.drain()` **again after** the `finish()` loop so finish-time emissions
