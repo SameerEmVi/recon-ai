@@ -66,6 +66,7 @@ class ScanController:
         max_agent_iterations: int = 20,
         agent_plan_first: bool = True,   # plan→execute: decompose the goal up front, then work the steps
         scan_id: object | None = None,   # pin the scan id (worker process); None = generate
+        exploration_enabled: bool = True,  # build a goal-driven exploration from the scan's data at finish
         # Rate limiting (None = no static limit; adaptive WAF backoff still applies)
         rate_limit: float | None = None,
         max_concurrency: int | None = None,
@@ -161,6 +162,7 @@ class ScanController:
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
         self._agent_plan_first = agent_plan_first
+        self._exploration_enabled = exploration_enabled
         self._scan_id = uuid.UUID(str(scan_id)) if scan_id else uuid.uuid4()
         # Browser header profile — resolved ONCE and kept stable for the whole
         # scan (no per-request rotation). The scan id seeds 'random' so a scan
@@ -469,6 +471,19 @@ class ScanController:
                     await self._persister.scan_fail(self._scan_id)
                 else:
                     await self._persister.scan_end(self._scan_id, self._bus.seen_count)
+                    # Build the goal-driven exploration from this scan's real data
+                    # (deterministic, idempotent; the LLM planner is the optional
+                    # enhancement). Guarded — a failure never affects the scan.
+                    if self._exploration_enabled:
+                        try:
+                            from exploration.bridge import build_from_scan
+                            run = await build_from_scan(
+                                self._persister._scan_repo._s, scan_job_id=self._scan_id,
+                                target=seed_domain, mode=self._mode)
+                            if run is not None:
+                                print(ui.info(f"exploration built → {run.id}"))
+                        except Exception as exc:
+                            log.debug("exploration build failed: %s", exc)
             # 3. Summary + planner stats — ALWAYS, so a stopped scan still reports.
             try:
                 self.print_summary()
