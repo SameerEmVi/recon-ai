@@ -227,6 +227,19 @@ class AssessUrlTool(AgentTool):
         if not self._scope_ok(host):
             return ToolResult(0, f"scope denied: {host}")
 
+        made, total, _ = await self.assess(url)
+        return ToolResult(
+            made, f"assess_url {url} → {total} result(s), {made} finding(s) stored")
+
+    async def assess(self, url: str) -> tuple[int, int, set]:
+        """Run the capture-backed assessment of one URL and return
+        (findings_created, results, produced_identities). The capturing fetch and
+        context build live here so both `run` (agent loop) and the pentest
+        section's retest can reuse them. The caller is responsible for the scope +
+        capability pre-checks (`run` does them)."""
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or url
         fetcher = _PentestFetcher(self._controller)
         captured: dict[str, list] = {}
 
@@ -236,11 +249,9 @@ class AssessUrlTool(AgentTool):
                 captured.setdefault(u, []).append(exchange_id)
             return result
 
-        made, total = await self._assess(host, url, capturing_fetch, captured)
-        return ToolResult(
-            made, f"assess_url {url} → {total} result(s), {made} finding(s) stored")
+        return await self._assess(host, url, capturing_fetch, captured)
 
-    async def _assess(self, host: str, url: str, fetch, captured: dict) -> tuple[int, int]:
+    async def _assess(self, host: str, url: str, fetch, captured: dict) -> tuple[int, int, set]:
         """Build a one-URL context, run the checks, persist + link findings.
 
         Separated from run() so it is unit-testable with an injected fetch and a
@@ -251,12 +262,20 @@ class AssessUrlTool(AgentTool):
 
         ctx = CheckContext(host, fetch=fetch, active_enabled=True)
         ctx.services = [{"url": url}]
+        # Enrich with accumulated recon state for this host (technologies, URLs)
+        # so technology-aware checks (known-cve, api-exposure, exposed-interface)
+        # apply too — not just the response-based header/cookie checks.
+        await self._load_host_context(ctx, host)
         outcome = await AssessmentEngine(active=True).assess({host: ctx})
 
         persister = getattr(self._controller, "persister", None)
         made = 0
+        # (host, title, category) of every finding this run produced — lets a
+        # retest tell whether a specific finding still reproduces.
+        produced: set[tuple[str, str, str]] = set()
         for r in outcome.emitted:
             fd = r.to_finding_data()
+            produced.add((fd.host, fd.title, fd.category))
             if persister is None:
                 made += 1                     # no DB: results reasoned over, not stored
                 continue
@@ -274,7 +293,39 @@ class AssessUrlTool(AgentTool):
                 made += 1
             for exchange_id in captured.get(r.url or url, []):
                 await persister.link_exchange(exchange_id, finding.id)
-        return made, len(outcome.results)
+        return made, len(outcome.results), produced
+
+    async def _load_host_context(self, ctx, host: str) -> None:
+        """Populate ctx.technologies / ctx.urls from the recon scan's persisted
+        events for this host, so technology-aware checks can run. Best-effort and
+        never raises — an empty context just means fewer checks apply."""
+        from urllib.parse import urlparse
+
+        persister = getattr(self._controller, "persister", None)
+        if persister is None:
+            return
+        repo = getattr(persister, "_event_repo", None)
+        if repo is None:
+            return
+        host_l = host.lower()
+        try:
+            from events.types import EventType
+
+            techs = await repo.get_by_type(self._controller.scan_id, EventType.TECHNOLOGY)
+            for e in techs:
+                d = e.data or {}
+                if str(d.get("host", "")).lower() == host_l and d.get("name"):
+                    # First non-empty version wins; keep a bare name otherwise.
+                    name = str(d["name"]).lower()
+                    if d.get("version") or name not in ctx.technologies:
+                        ctx.technologies[name] = d.get("version")
+            urls = await repo.get_by_type(self._controller.scan_id, EventType.URL)
+            for e in urls:
+                u = (e.data or {}).get("url")
+                if u and (urlparse(u).hostname or "").lower() == host_l:
+                    ctx.urls.add(u)
+        except Exception as exc:
+            self._controller and log.debug("host-context load failed: %s", exc)
 
 
 # ── tool registry ─────────────────────────────────────────────────────────────
