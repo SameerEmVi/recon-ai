@@ -38,6 +38,19 @@ class ToolResult:
     summary: str
 
 
+# Capabilities whose actions a human should sign off on in the pentest section:
+# a vulnerability check or an intrusive test sends payloads meant to probe for a
+# weakness, unlike passive recon or plain discovery.
+HIGH_RISK_CAPABILITIES = frozenset({"VULNERABILITY_CHECK", "INTRUSIVE_TEST"})
+
+
+def tool_risk(tool: "AgentTool") -> str:
+    """'high' for a vulnerability-check/intrusive tool, else 'low' — drives the
+    REVIEW approval gate (agent.approval)."""
+    from agent.approval import RISK_HIGH, RISK_LOW
+    return RISK_HIGH if getattr(tool, "required_capability", "") in HIGH_RISK_CAPABILITIES else RISK_LOW
+
+
 class AgentTool(ABC):
     """Base class for all agent tools."""
 
