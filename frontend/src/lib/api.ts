@@ -514,24 +514,47 @@ export const getExecMap = (scanId?: string) =>
   apiFetch<ExecMap>("/api/execmap" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : ""));
 
 // ── Exploration graph (reasoning map) ─────────────────────────────────────────
-export type ExploreKind = "start" | "goal" | "intent" | "fact" | "vulnerability";
-export type ExploreRel = "spawns" | "intent-chain" | "yields" | "proves";
+// Left-to-right plan: start/scope → goals (one per capability tier, processed in
+// order) → intents (tools) → facts / vulnerabilities. See api/exploration.py.
+export type ExploreKind = "start" | "scope" | "goal" | "intent" | "fact" | "vulnerability";
+export type ExploreRel = "spawns" | "next" | "constrains" | "intent-chain" | "yields" | "proves";
+export type ExploreTier = "osint" | "recon" | "pentest";
 export interface ExploreNode {
   id: string;
   kind: ExploreKind;
   label: string;
+  summary?: string;
+  state?: string;
+  priority?: number;
+  tier?: ExploreTier;
+  step?: number;            // goal: 1-based processing order
+  order?: number;           // intent: order within its goal (chronological)
   count?: number;
   hosts?: number;
-  state?: string | null;
+  intents?: number;
+  events?: number;
+  done?: number;
+  reason?: string;          // goal: why it is locked
+  caps?: string[];
   seed?: boolean;
+  first_seen?: string;
+  last_seen?: string;
+  failed_jobs?: number;
+  fed_by?: string[];
+  feeds?: string[];
+  more_facts?: number;
   etype?: string;
+  samples?: string[];
   severity?: string;
   category?: string;
   host?: string;
+  verification?: string;
+  confidence?: number;
   mode?: string | null;
   status?: string | null;
-  intents?: number;
-  events?: number;
+  in_scope?: string[];
+  out_scope?: string[];
+  max_distance?: number;
 }
 export interface ExploreEdge {
   id: string;
@@ -543,9 +566,77 @@ export interface ExplorationMap {
   scan: { scan_id: string; domain: string; status: string; mode: string } | null;
   nodes: ExploreNode[];
   edges: ExploreEdge[];
-  summary: { intents: number; facts: number; vulnerabilities: number; events: number };
+  summary: {
+    goals: number;
+    goals_achieved: number;
+    intents: number;
+    facts: number;
+    vulnerabilities: number;
+    events: number;
+  };
 }
 export const getExploration = (scanId?: string) =>
   apiFetch<ExplorationMap>(
     "/api/exploration" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "")
   );
+
+// ── Pentest section (manual, agent-driven assessment on a recon'd host) ───────────
+export interface EvidenceExchange {
+  id: string;
+  finding_id: string | null;
+  host: string;
+  method: string;
+  url: string;
+  status_code: number | null;
+  request_headers: Record<string, string>;
+  response_headers: Record<string, string>;
+  request_body: string | null;
+  response_body: string | null;
+  request_size: number | null;
+  response_size: number | null;
+  response_truncated: boolean;
+  bodies_available: boolean;
+  bodies_dropped: string | null;
+  duration_ms: number | null;
+  source_tool: string | null;
+  created_at: string | null;
+}
+export interface PentestFinding {
+  id: string;
+  host: string;
+  title: string;
+  category: string;
+  severity: string | null;
+  evidence: EvidenceExchange[];
+}
+export interface AssessResult {
+  ok: boolean;
+  error?: string;
+  url?: string;
+  host?: string;
+  summary?: string;
+  findings_created?: number;
+  findings?: PentestFinding[];
+}
+export const assessUrl = (scanId: string, url: string) =>
+  apiFetch<AssessResult>("/api/pentest/assess", {
+    method: "POST",
+    body: JSON.stringify({ scan_id: scanId, url }),
+  });
+
+export interface EvidenceList {
+  exchanges: EvidenceExchange[];
+  count: number;
+  key_available: boolean;
+}
+export const getEvidence = (params: { scanId?: string; findingId?: string }) => {
+  const q = new URLSearchParams();
+  if (params.scanId) q.set("scan_id", params.scanId);
+  if (params.findingId) q.set("finding_id", params.findingId);
+  const s = q.toString();
+  return apiFetch<EvidenceList>("/api/evidence" + (s ? `?${s}` : ""));
+};
+
+export interface ReconScan { scan_id: string; domain: string; mode: string; status: string }
+export const getPentestScans = () =>
+  apiFetch<{ scans: ReconScan[] }>("/api/pentest/scans");

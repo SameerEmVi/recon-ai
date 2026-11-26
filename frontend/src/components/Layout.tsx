@@ -1,23 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { PageTransition } from "@/components/PageTransition";
-import {
-  LayoutDashboard,
-  Crosshair,
-  Activity,
-  ListChecks,
-  Share2,
-  Workflow,
-  Network,
-  Server,
-  Radio,
-  ShieldAlert,
-  Bug,
-  Sparkles,
-  ScrollText,
-  Settings as SettingsIcon,
-  LogOut,
-} from "lucide-react";
+import { Activity, Bug, Crosshair, LayoutDashboard, ListChecks, LogOut, Network, Radio, ScrollText, Server, Settings as SettingsIcon, Share2, ShieldAlert, ShieldCheck, Sparkles, Workflow } from "lucide-react";
 import { getHealth } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 import { cn } from "@/lib/cn";
@@ -34,6 +18,7 @@ const NAV = [
   { to: "/assets", label: "Assets", icon: Server },
   { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert },
   { to: "/findings", label: "Findings", icon: Bug },
+  { to: "/pentest", label: "Pentest", icon: ShieldCheck },
   { to: "/skills", label: "Skills", icon: Sparkles },
   { to: "/diagnostics", label: "Diagnostics", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: SettingsIcon },

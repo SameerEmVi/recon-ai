@@ -157,6 +157,12 @@ def register(cls: type[BaseModule]) -> type[BaseModule]:
     return cls
 
 
+def _tier_of(klass) -> str | None:
+    """The lowest tier (osint/recon/pentest) whose ceiling permits this module."""
+    from policy.policy import CapabilityPolicy
+    return CapabilityPolicy.module_tier(klass)
+
+
 class ModuleRegistry:
     _discovered = False
 
@@ -281,6 +287,7 @@ class ModuleRegistry:
                 "watched_events": klass.watched_events,
                 "produced_events": klass.produced_events,
                 "deps_binary": klass.deps_binary,
+                "tier": _tier_of(klass),
             }
             for klass in sorted(_registry.values(), key=lambda k: k.name)
         ]
