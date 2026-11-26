@@ -133,6 +133,15 @@ class Persister:
                 await self._session.rollback()
                 return None
 
+    async def find_finding(self, scan_id: UUID, host: str, title: str, category: str):
+        """The existing finding with this dedup identity, or None — lets the
+        pentest tools re-bind evidence to a finding instead of duplicating it."""
+        async with self._lock:
+            try:
+                return await self._finding_repo.find_by_identity(scan_id, host, title, category)
+            except Exception:
+                return None
+
     async def record_module_job(
         self, scan_id: UUID, target: str, module: str, state: str,
         *, error: str | None = None,

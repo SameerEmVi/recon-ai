@@ -257,15 +257,21 @@ class AssessUrlTool(AgentTool):
         made = 0
         for r in outcome.emitted:
             fd = r.to_finding_data()
-            made += 1
             if persister is None:
-                continue                      # no DB: results reasoned over, not stored
-            finding = await persister.save_finding(Finding(
-                scan_job_id=self._controller.scan_id, host=fd.host, title=fd.title,
-                description=fd.description, category=fd.category,
-                severity_hint=fd.severity_hint, evidence=fd.evidence))
-            if finding is None:
+                made += 1                     # no DB: results reasoned over, not stored
                 continue
+            # Idempotent: re-assessing a URL binds fresh evidence to the existing
+            # finding instead of creating a duplicate (same host:title:category).
+            finding = await persister.find_finding(
+                self._controller.scan_id, fd.host, fd.title, fd.category)
+            if finding is None:
+                finding = await persister.save_finding(Finding(
+                    scan_job_id=self._controller.scan_id, host=fd.host, title=fd.title,
+                    description=fd.description, category=fd.category,
+                    severity_hint=fd.severity_hint, evidence=fd.evidence))
+                if finding is None:
+                    continue
+                made += 1
             for exchange_id in captured.get(r.url or url, []):
                 await persister.link_exchange(exchange_id, finding.id)
         return made, len(outcome.results)

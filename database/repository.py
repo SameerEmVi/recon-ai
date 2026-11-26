@@ -317,6 +317,22 @@ class FindingRepository:
         )
         return list(result.scalars())
 
+    async def find_by_identity(
+        self, scan_id: UUID, host: str, title: str, category: str,
+    ) -> Finding | None:
+        """The existing finding with the same dedup identity (host:title:category)
+        within a scan, if any — so a re-run binds new evidence to it instead of
+        creating a duplicate. Mirrors the event bus's finding dedup key."""
+        result = await self._s.execute(
+            select(Finding).where(
+                Finding.scan_job_id == scan_id,
+                Finding.host == host,
+                Finding.title == title,
+                Finding.category == category,
+            ).limit(1)
+        )
+        return result.scalars().first()
+
 
 # ── JobRepository (hybrid scanning engine — job lifecycle persistence) ──────────
 
