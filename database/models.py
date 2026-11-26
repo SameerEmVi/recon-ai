@@ -21,7 +21,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Optional
 
-from sqlalchemy import Column, JSON, UniqueConstraint
+from sqlalchemy import Column, JSON, LargeBinary, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -133,6 +133,58 @@ class FindingTriage(SQLModel, table=True):
     verification_override: Optional[str] = Field(default=None)   # operator-set status
     note: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+# ── HttpExchange (evidence store — the agent-driven pentest section) ────────────
+
+class HttpExchange(SQLModel, table=True):
+    """One captured request/response pair — the *proof* a pentest finding points
+    to (see docs/pentest-section-design.md §6).
+
+    Separation of concerns, mirroring the deterministic-vs-LLM split elsewhere:
+      - **URL + headers are redacted at capture** (`net.redact`): secret headers
+        and sensitive query params are masked before anything touches disk, so
+        they are never stored even in ciphertext.
+      - **Bodies are encrypted at rest** (`evidence.crypto`) and stored verbatim
+        (the proof must be exact). They decrypt only with the configured key, for
+        the authorized operator — never fed to the LLM raw.
+      - **Fail-closed:** with no evidence key configured, bodies are *not* stored
+        (columns stay null, `bodies_dropped` says why); the redacted metadata is
+        still kept, so the store degrades to today's metadata-only behaviour
+        rather than writing plaintext bodies to disk.
+
+    `finding_id` is nullable: an exchange is captured when a tool runs and is
+    linked to the finding it supports once that finding exists (one finding can
+    cite several exchanges; an exchange may support more than one finding via the
+    strongest link — the first that claims it)."""
+
+    __tablename__ = "http_exchanges"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    scan_job_id: uuid.UUID = Field(foreign_key="scan_jobs.id", index=True)
+    finding_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="findings.id", index=True)
+    host: str = Field(index=True)
+    method: str
+    url: str                                  # redacted (userinfo + secret params stripped)
+    status_code: Optional[int] = Field(default=None)
+
+    # Redacted header maps (secret headers masked) — safe to store as-is.
+    request_headers: Optional[Any] = Field(default=None, sa_column=Column(JSON))
+    response_headers: Optional[Any] = Field(default=None, sa_column=Column(JSON))
+
+    # Bodies: Fernet ciphertext when an evidence key is configured, else null.
+    request_body: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    response_body: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    body_encrypted: bool = Field(default=False)
+    bodies_dropped: Optional[str] = Field(default=None)   # why bodies were not stored
+    request_size: Optional[int] = Field(default=None)     # original plaintext byte size
+    response_size: Optional[int] = Field(default=None)
+    response_truncated: bool = Field(default=False)       # response body exceeded the cap
+
+    duration_ms: Optional[float] = Field(default=None)
+    source_tool: Optional[str] = Field(default=None)      # the tool/step that made the request
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ── VocabularyItem (persistent reconnaissance learning system) ──────────────────

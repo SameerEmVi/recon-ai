@@ -168,6 +168,11 @@ class ScanController:
         # ValueError here (fail-closed) rather than silently sending defaults.
         from net.headers import resolve as _resolve_headers
         self._headers = _resolve_headers(browser_profile, seed=str(self._scan_id))
+        # Evidence-store cipher (at-rest body encryption for captured exchanges).
+        # Keyed from RECON_AI_EVIDENCE_KEY; disabled (bodies not stored) when
+        # unset — fail-closed. A bad key raises here rather than silently off.
+        from evidence.crypto import EvidenceCipher
+        self._evidence_cipher = EvidenceCipher.from_env()
         self._persister: Persister | None = None
         self._knowledge_base: "KnowledgeBase | None" = None
         # The async DB engine + the two sessions opened on it (persister, KB),
@@ -749,6 +754,12 @@ class ScanController:
         """The scan's browser HeaderProfile (None when off). Applied to every
         outbound request by BaseModule.http_client and the httpx prober."""
         return self._headers
+
+    @property
+    def evidence_cipher(self):
+        """The scan's EvidenceCipher (at-rest body encryption for the evidence
+        store; disabled when RECON_AI_EVIDENCE_KEY is unset)."""
+        return self._evidence_cipher
 
     @property
     def scheduler_report(self):

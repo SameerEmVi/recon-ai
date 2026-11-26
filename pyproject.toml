@@ -34,6 +34,12 @@ web = [
     "uvicorn>=0.30",
     "websockets>=13",
 ]
+evidence = [
+    # At-rest encryption of captured request/response bodies in the evidence
+    # store (RECON_AI_EVIDENCE_KEY). Imported lazily: only configuring a key
+    # needs it. See docs/pentest-section-design.md §6.
+    "cryptography>=42",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

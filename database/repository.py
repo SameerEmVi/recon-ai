@@ -21,6 +21,7 @@ from database.models import (
     EventRecord,
     Finding,
     Host,
+    HttpExchange,
     JobRecord,
     ScanJob,
     VocabularyItem,
@@ -500,3 +501,53 @@ class VocabularyRepository:
         by_scope = {row[0]: row[1] for row in (await self._s.execute(scope_stmt)).all()}
         total = (await self._s.execute(total_stmt)).scalar_one()
         return {"total": total, "by_category": by_cat, "by_scope": by_scope}
+
+
+# ── HttpExchangeRepository (evidence store) ─────────────────────────────────────
+
+class HttpExchangeRepository:
+    """Persist and read captured request/response evidence (database.models
+    .HttpExchange). Rows are already redacted + (optionally) encrypted by
+    `evidence.build_exchange`; this layer is pure storage, like FindingRepository.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def save(self, exchange: HttpExchange) -> HttpExchange:
+        self._s.add(exchange)
+        await self._s.commit()
+        await self._s.refresh(exchange)
+        return exchange
+
+    async def link_to_finding(self, exchange_id: UUID, finding_id: UUID) -> bool:
+        """Bind an already-stored exchange to the finding it proves. First claim
+        wins: an exchange already linked to a finding is left untouched (returns
+        False), so a shared exchange keeps its original attribution."""
+        result = await self._s.execute(
+            update(HttpExchange)
+            .where(HttpExchange.id == exchange_id, HttpExchange.finding_id.is_(None))
+            .values(finding_id=finding_id)
+        )
+        await self._s.commit()
+        return (result.rowcount or 0) > 0
+
+    async def list_for_scan(self, scan_id: UUID, limit: int = 1000) -> list[HttpExchange]:
+        result = await self._s.execute(
+            select(HttpExchange)
+            .where(HttpExchange.scan_job_id == scan_id)
+            .order_by(HttpExchange.created_at)
+            .limit(limit)
+        )
+        return list(result.scalars())
+
+    async def list_for_finding(self, finding_id: UUID) -> list[HttpExchange]:
+        result = await self._s.execute(
+            select(HttpExchange)
+            .where(HttpExchange.finding_id == finding_id)
+            .order_by(HttpExchange.created_at)
+        )
+        return list(result.scalars())
+
+    async def get(self, exchange_id: UUID) -> HttpExchange | None:
+        return await self._s.get(HttpExchange, exchange_id)
