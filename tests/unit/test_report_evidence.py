@@ -69,6 +69,24 @@ def test_markdown_without_evidence_still_renders():
     assert "**Evidence**" not in md                  # falls back to structured evidence line
 
 
+def test_html_report_escapes_captured_body():
+    from vulnscan.report import render_html
+    r = _result()
+    # A captured body containing HTML must be escaped, never injected into the page.
+    ev = {r.dedup_key: [{
+        "method": "GET", "status_code": 200, "url": "https://api.example.com/",
+        "source_tool": "assess_url",
+        "response_body": "<script>alert('xss')</script><b>page</b>",
+        "bodies_dropped": None,
+    }]}
+    h = render_html(build_report("example.com", [r], evidence=ev))
+    assert h.startswith("<!doctype html>") and "Vulnerability Assessment" in h
+    assert "Missing security headers" in h
+    assert "<pre>" in h                               # evidence body block present
+    assert "&lt;script&gt;alert(" in h                # escaped
+    assert "<script>alert(" not in h                  # NOT injected
+
+
 # ── DB round-trip: build_scan_report attaches real evidence ───────────────────────
 
 @pytest.fixture

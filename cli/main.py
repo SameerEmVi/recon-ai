@@ -655,7 +655,7 @@ def report(
     target: str = typer.Argument(..., help="Scan UUID, or a domain (uses its most recent scan)."),
     db_url: str = typer.Option(..., "--db-url", help="Database URL."),
     json_out: bool = typer.Option(False, "--json", help="Shorthand for --format json."),
-    fmt: str = typer.Option("text", "--format", "-f", help="Output format: text | json | md (Markdown with per-finding evidence)."),
+    fmt: str = typer.Option("text", "--format", "-f", help="Output format: text | json | md | html (md/html carry per-finding evidence)."),
     output: str | None = typer.Option(None, "-O", "--output", help="Write to a file instead of stdout."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -668,8 +668,8 @@ def report(
     """
     _setup_logging(verbose)
     resolved = "json" if json_out else fmt.lower()
-    if resolved not in ("text", "json", "md", "markdown"):
-        typer.echo(f"[error] unknown --format {fmt!r}. Use: text | json | md", err=True)
+    if resolved not in ("text", "json", "md", "markdown", "html"):
+        typer.echo(f"[error] unknown --format {fmt!r}. Use: text | json | md | html", err=True)
         raise typer.Exit(code=1)
     asyncio.run(_report(target, db_url, resolved, output))
 

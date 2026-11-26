@@ -642,7 +642,7 @@ export const getPentestScans = () =>
   apiFetch<{ scans: ReconScan[] }>("/api/pentest/scans");
 
 // Download the evidence-aware vulnerability report (Markdown by default).
-export async function downloadReport(scanId: string, format: "md" | "json" | "text" = "md"): Promise<void> {
+export async function downloadReport(scanId: string, format: "md" | "html" | "json" | "text" = "md"): Promise<void> {
   const token = getToken();
   const res = await fetch(`/api/report?scan_id=${encodeURIComponent(scanId)}&format=${format}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -650,7 +650,7 @@ export async function downloadReport(scanId: string, format: "md" | "json" | "te
   if (!res.ok) throw new ApiError(res.status, "report export failed");
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
-  const ext = format === "json" ? "json" : format === "md" ? "md" : "txt";
+  const ext = format === "json" ? "json" : format === "html" ? "html" : format === "md" ? "md" : "txt";
   const a = document.createElement("a");
   a.href = url;
   a.download = `recon-ai-report-${scanId.slice(0, 8)}.${ext}`;

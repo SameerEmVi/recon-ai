@@ -76,9 +76,11 @@ async def build_scan_report(db_url: str | None, target: str,
 
 
 def render_report(report: dict, fmt: str) -> str:
-    from vulnscan.report import render_json, render_markdown, render_text
+    from vulnscan.report import render_html, render_json, render_markdown, render_text
     if fmt == "json":
         return render_json(report)
     if fmt in ("md", "markdown"):
         return render_markdown(report)
+    if fmt == "html":
+        return render_html(report)
     return "\n".join(render_text(report))
