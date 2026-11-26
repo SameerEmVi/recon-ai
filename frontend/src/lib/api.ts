@@ -579,3 +579,64 @@ export const getExploration = (scanId?: string) =>
   apiFetch<ExplorationMap>(
     "/api/exploration" + (scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "")
   );
+
+// ── Pentest section (manual, agent-driven assessment on a recon'd host) ───────────
+export interface EvidenceExchange {
+  id: string;
+  finding_id: string | null;
+  host: string;
+  method: string;
+  url: string;
+  status_code: number | null;
+  request_headers: Record<string, string>;
+  response_headers: Record<string, string>;
+  request_body: string | null;
+  response_body: string | null;
+  request_size: number | null;
+  response_size: number | null;
+  response_truncated: boolean;
+  bodies_available: boolean;
+  bodies_dropped: string | null;
+  duration_ms: number | null;
+  source_tool: string | null;
+  created_at: string | null;
+}
+export interface PentestFinding {
+  id: string;
+  host: string;
+  title: string;
+  category: string;
+  severity: string | null;
+  evidence: EvidenceExchange[];
+}
+export interface AssessResult {
+  ok: boolean;
+  error?: string;
+  url?: string;
+  host?: string;
+  summary?: string;
+  findings_created?: number;
+  findings?: PentestFinding[];
+}
+export const assessUrl = (scanId: string, url: string) =>
+  apiFetch<AssessResult>("/api/pentest/assess", {
+    method: "POST",
+    body: JSON.stringify({ scan_id: scanId, url }),
+  });
+
+export interface EvidenceList {
+  exchanges: EvidenceExchange[];
+  count: number;
+  key_available: boolean;
+}
+export const getEvidence = (params: { scanId?: string; findingId?: string }) => {
+  const q = new URLSearchParams();
+  if (params.scanId) q.set("scan_id", params.scanId);
+  if (params.findingId) q.set("finding_id", params.findingId);
+  const s = q.toString();
+  return apiFetch<EvidenceList>("/api/evidence" + (s ? `?${s}` : ""));
+};
+
+export interface ReconScan { scan_id: string; domain: string; mode: string; status: string }
+export const getPentestScans = () =>
+  apiFetch<{ scans: ReconScan[] }>("/api/pentest/scans");

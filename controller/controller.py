@@ -96,6 +96,10 @@ class ScanController:
         # out of authorization). Applies in active/full only (PORT_SCANNING gate).
         scan_resolved_ips: bool = True,
         scan_cdn_ips: bool = False,
+        # Adopt an existing scan's id instead of minting a new one — used to run a
+        # one-off tool (the pentest section's assess) against a finished recon
+        # scan so its findings/evidence attach to that same scan.
+        scan_id: "uuid.UUID | None" = None,
     ) -> None:
         self._scope_engine = ScopeEngine(scope)
         self._scope = scope
@@ -161,7 +165,7 @@ class ScanController:
         self._ai_model = ai_model
         self._max_agent_iterations = max_agent_iterations
         self._agent_plan_first = agent_plan_first
-        self._scan_id = uuid.uuid4()
+        self._scan_id = scan_id or uuid.uuid4()
         # Browser header profile — resolved ONCE and kept stable for the whole
         # scan (no per-request rotation). The scan id seeds 'random' so a scan
         # stays on one fingerprint and reruns reproduce. A bad name raises
@@ -820,11 +824,16 @@ class ScanController:
             log.warning("diagnostics disabled: %s", exc)
             self._diagnostics = None
 
-    async def _init_db(self) -> None:
+    async def attach_persistence(self) -> None:
+        """Open the DB engine/session + persister (+ KB) WITHOUT recording a scan
+        row. Used by `_init_db` (which then records the scan) and by a one-off
+        tool run that attaches to an EXISTING scan — the pentest section, where
+        `scan_id` was set to the finished recon scan so new findings/evidence
+        land under it. Idempotent-safe: call once, pair with `_teardown_db`."""
         from database.persister import Persister
         from database.session import init_db, make_engine, make_session_factory
         engine = make_engine(self._db_url)  # type: ignore[arg-type]
-        await init_db(engine)
+        await init_db(engine)                   # create_all is harmless if tables exist
         self._db_engine = engine                # retained for clean teardown
         factory = make_session_factory(engine)
         session = factory()
@@ -835,6 +844,9 @@ class ScanController:
         from database.knowledge_base import KnowledgeBase
         self._kb_session = factory()
         self._knowledge_base = KnowledgeBase(self._kb_session)
+
+    async def _init_db(self) -> None:
+        await self.attach_persistence()
         scope_config = {
             "in_scope": [r.raw for r in self._scope.in_scope],
             "out_scope": [r.raw for r in self._scope.out_scope],
