@@ -448,7 +448,7 @@ Module registry (`modules/registry.py`): auto-discovery via `@register` +
 | `controller/` | `controller.py` (scan lifecycle) |
 | `database/` | SQLModel models, repositories, persister, session, diff, `knowledge_base.py` (persistent recon-learning service) (asyncpg/aiosqlite) |
 | `ai/` | `assessor.py` (forced-schema LLM call), `triage.py` (post-scan), `prompts/` |
-| `agent/` | Phase-4 agent loop: `loop.py`, `approval.py`, `stopping.py`, `tools.py` |
+| `agent/` | Phase-4 agent loop: `loop.py`, `approval.py`, `stopping.py`, `tools.py` (incl. `AssessUrlTool` — the first capture-backed pentest tool: runs the `vulnscan` checks on one URL, creates evidence-bound findings synchronously, pentest tier only) |
 | `mcpserver/` | FastMCP server exposing 8 tools; `context.py` in-process scan registry |
 | `ratelimit/` | `RateLimiter` + `waf.py` — throttling & adaptive WAF backoff (used everywhere) |
 | `planner/` | `ReconPlanner` — Adaptive Reconnaissance Planner (gates which modules run; cost/value/technology/budget-aware) |

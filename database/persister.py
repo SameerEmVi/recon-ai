@@ -119,6 +119,20 @@ class Persister:
                 await self._session.rollback()
                 return False
 
+    async def save_finding(self, finding):
+        """Persist one Finding synchronously and return it (with its id) — the
+        evidence-bound path the agent-driven pentest tools use, where the finding
+        is created deterministically by code, not materialized from an event, so
+        its exchanges can be linked straight away. Serialized; returns None on
+        failure (never raises into the caller)."""
+        async with self._lock:
+            try:
+                return await self._finding_repo.save(finding)
+            except Exception as exc:
+                log.debug("db: save_finding failed (%s) — rolling back", exc)
+                await self._session.rollback()
+                return None
+
     async def record_module_job(
         self, scan_id: UUID, target: str, module: str, state: str,
         *, error: str | None = None,
